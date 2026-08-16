@@ -8,7 +8,7 @@ import type CopyousExtension from '../../../extension.js';
 import { registerClass } from '../../common/gjs.js';
 import { CustomColorScheme } from '../../common/settings.js';
 import { Language } from '../../database/database.js';
-import { normalizeIndentation, trim } from './label.js';
+import { normalizeIndentation, trim, truncatePreview } from './label.js';
 
 // https://gitlab.gnome.org/GNOME/gtksourceview/-/blob/master/data/styles/Adwaita-dark.xml
 // https://gitlab.gnome.org/GNOME/gtksourceview/-/blob/master/data/styles/Adwaita.xml
@@ -363,7 +363,7 @@ export class CodeLabel extends St.Label {
 		if (this._code == null) return;
 
 		// Trim indentation before highlighting to prevent empty lines
-		let text = normalizeIndentation(trim(this._code), this.tabWidth);
+		let text = normalizeIndentation(trim(truncatePreview(this._code)), this.tabWidth);
 		if (this.syntaxHighlighting && this.ext.hljs != null) {
 			const language =
 				this.language && this.ext.hljs.getLanguage(this.language.id) != null ? this.language.id : null;

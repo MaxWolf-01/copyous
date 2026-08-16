@@ -7,6 +7,34 @@ interface ConstructorProps {
 	tabWidth: number;
 }
 
+// Even a full-screen preview card displays far less than this. Capping the text
+// before it reaches Pango/highlight.js keeps the layout cost of huge clipboard
+// entries bounded; the full content is still stored, searched, and pasted.
+const PREVIEW_MAX_CHARS = 4096;
+const PREVIEW_MAX_LINES = 100;
+
+/**
+ * Truncate text to a bounded number of characters and lines for use in previews
+ * @param text The text to truncate
+ */
+export function truncatePreview(text: string): string {
+	if (text.length > PREVIEW_MAX_CHARS) {
+		text = text.slice(0, PREVIEW_MAX_CHARS);
+
+		// Do not split a surrogate pair
+		const last = text.charCodeAt(text.length - 1);
+		if (last >= 0xd800 && last <= 0xdbff) text = text.slice(0, -1);
+	}
+
+	let i = -1;
+	for (let n = 0; n < PREVIEW_MAX_LINES; n++) {
+		i = text.indexOf('\n', i + 1);
+		if (i === -1) return text;
+	}
+
+	return text.slice(0, i);
+}
+
 /**
  * Remove leading/trailing blank lines (empty lines or lines containing just spaces/tabs)
  * @param text The text to trim
@@ -81,6 +109,6 @@ export class Label extends St.Label {
 	}
 
 	private updateLabel() {
-		this.text = normalizeIndentation(trim(this.label), this.tabWidth);
+		this.text = normalizeIndentation(trim(truncatePreview(this.label)), this.tabWidth);
 	}
 }
