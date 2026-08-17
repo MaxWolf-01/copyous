@@ -1,4 +1,5 @@
 import Clutter from 'gi://Clutter';
+import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import Gio from 'gi://Gio';
 import Graphene from 'gi://Graphene';
@@ -422,6 +423,8 @@ export class ClipboardDialog extends St.Widget {
 	public open() {
 		if (this.opened || this._closing) return;
 
+		const openStart = GLib.get_monotonic_time();
+
 		this._updateCursor = false;
 		this._nextCursor = this._cursor;
 
@@ -471,6 +474,18 @@ export class ClipboardDialog extends St.Widget {
 
 		this.opened = true;
 		global.compositor.disable_unredirect();
+
+		// Perf telemetry: setup = synchronous work in open(), paint = layout+paint
+		// of the item tree in the first frame after mapping
+		const setupDone = GLib.get_monotonic_time();
+		const paintId = global.stage.connect('after-paint', () => {
+			global.stage.disconnect(paintId);
+			const paintDone = GLib.get_monotonic_time();
+			this.ext.logger.log(
+				`open timing: setup ${((setupDone - openStart) / 1000).toFixed(1)}ms, ` +
+					`first paint ${((paintDone - setupDone) / 1000).toFixed(1)}ms`,
+			);
+		});
 
 		this._dialog.ease({
 			opacity: 255,
