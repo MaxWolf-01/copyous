@@ -263,6 +263,7 @@ export class ClipboardDialog extends St.Widget {
 
 	private _orientation: Clutter.Orientation = Clutter.Orientation.HORIZONTAL;
 	private _perf: number[] | undefined;
+	private _perfPaintId: number = -1;
 
 	private readonly _ibusManager: IBusManager.IBusManager;
 
@@ -404,6 +405,11 @@ export class ClipboardDialog extends St.Widget {
 		this._ibusManager.disconnectObject(this);
 		this.ext.settings.disconnectObject(this);
 
+		if (this._perfPaintId >= 0) {
+			global.stage.disconnect(this._perfPaintId);
+			this._perfPaintId = -1;
+		}
+
 		super.destroy();
 	}
 
@@ -443,14 +449,14 @@ export class ClipboardDialog extends St.Widget {
 		}
 
 		this._grab = grab;
-		this._perf?.push(GLib.get_monotonic_time()); // grab
+		this._perf?.push(GLib.get_monotonic_time()); // ends: grab
 		this._monitorConstraint.index = global.display.get_current_monitor();
 		Main.layoutManager.emit('system-modal-opened');
-		this._perf?.push(GLib.get_monotonic_time()); // modal-opened emit
+		this._perf?.push(GLib.get_monotonic_time()); // ends: emit
 
 		this._dialog.opacity = 0;
 		this.show();
-		this._perf?.push(GLib.get_monotonic_time()); // show (map + vfunc_map)
+		this._perf?.push(GLib.get_monotonic_time()); // ends: show-rest
 
 		const horizontal = this._orientation === Clutter.Orientation.HORIZONTAL;
 		if (horizontal && this._dialog.y_align === Clutter.ActorAlign.START) {
@@ -483,9 +489,19 @@ export class ClipboardDialog extends St.Widget {
 
 		// Perf telemetry: consecutive segments of open(), ending at first paint.
 		// map/fit/focus happen inside show() via vfunc_map.
-		this._perf?.push(GLib.get_monotonic_time()); // setup end
-		const paintId = global.stage.connect('after-paint', () => {
-			global.stage.disconnect(paintId);
+		this._perf?.push(GLib.get_monotonic_time()); // ends: setup-rest
+		if (this._perfPaintId >= 0) global.stage.disconnect(this._perfPaintId);
+		this._perfPaintId = global.stage.connect('after-paint', (_stage: Clutter.Stage, view: Clutter.StageView) => {
+			// after-paint fires once per stage view (monitor); only the paint of
+			// the dialog's monitor ends the measurement
+			const monitor = Main.layoutManager.monitors[this._monitorConstraint.index];
+			if (monitor && view) {
+				const layout = view.layout;
+				if (layout.x !== monitor.x || layout.y !== monitor.y) return;
+			}
+
+			global.stage.disconnect(this._perfPaintId);
+			this._perfPaintId = -1;
 			const perf = this._perf;
 			this._perf = undefined;
 			if (!perf) return;
@@ -859,17 +875,17 @@ export class ClipboardDialog extends St.Widget {
 
 	override vfunc_map(): void {
 		super.vfunc_map();
-		this._perf?.push(GLib.get_monotonic_time()); // map
+		this._perf?.push(GLib.get_monotonic_time()); // ends: map
 
 		// Update fit constraint
 		this.updateFitConstraint();
-		this._perf?.push(GLib.get_monotonic_time()); // fit
+		this._perf?.push(GLib.get_monotonic_time()); // ends: fit
 
 		// Navigate to first item
 		if (!this._scrollView.navigate_focus(null, St.DirectionType.DOWN, false)) {
 			this._header.updateHeader(true, false);
 			this._header.searchEntry.grab_key_focus();
 		}
-		this._perf?.push(GLib.get_monotonic_time()); // focus
+		this._perf?.push(GLib.get_monotonic_time()); // ends: focus
 	}
 }
