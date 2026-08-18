@@ -262,6 +262,7 @@ export class ClipboardDialog extends St.Widget {
 	private _cursor: [number, number] | null = null;
 
 	private _orientation: Clutter.Orientation = Clutter.Orientation.HORIZONTAL;
+	private _perf: number[] | undefined;
 
 	private readonly _ibusManager: IBusManager.IBusManager;
 
@@ -428,6 +429,8 @@ export class ClipboardDialog extends St.Widget {
 		this._updateCursor = false;
 		this._nextCursor = this._cursor;
 
+		this._perf = [openStart];
+
 		const grab = Main.pushModal(this, { actionMode: Shell.ActionMode.SYSTEM_MODAL }) as Clutter.Grab;
 		// GNOME 50 (Mutter 18) removed get_seat_state()/GrabState in favor of is_revoked()
 		const grabFailed =
@@ -440,11 +443,14 @@ export class ClipboardDialog extends St.Widget {
 		}
 
 		this._grab = grab;
+		this._perf?.push(GLib.get_monotonic_time()); // grab
 		this._monitorConstraint.index = global.display.get_current_monitor();
 		Main.layoutManager.emit('system-modal-opened');
+		this._perf?.push(GLib.get_monotonic_time()); // modal-opened emit
 
 		this._dialog.opacity = 0;
 		this.show();
+		this._perf?.push(GLib.get_monotonic_time()); // show (map + vfunc_map)
 
 		const horizontal = this._orientation === Clutter.Orientation.HORIZONTAL;
 		if (horizontal && this._dialog.y_align === Clutter.ActorAlign.START) {
@@ -475,16 +481,21 @@ export class ClipboardDialog extends St.Widget {
 		this.opened = true;
 		global.compositor.disable_unredirect();
 
-		// Perf telemetry: setup = synchronous work in open(), paint = layout+paint
-		// of the item tree in the first frame after mapping
-		const setupDone = GLib.get_monotonic_time();
+		// Perf telemetry: consecutive segments of open(), ending at first paint.
+		// map/fit/focus happen inside show() via vfunc_map.
+		this._perf?.push(GLib.get_monotonic_time()); // setup end
 		const paintId = global.stage.connect('after-paint', () => {
 			global.stage.disconnect(paintId);
-			const paintDone = GLib.get_monotonic_time();
-			this.ext.logger.log(
-				`open timing: setup ${((setupDone - openStart) / 1000).toFixed(1)}ms, ` +
-					`first paint ${((paintDone - setupDone) / 1000).toFixed(1)}ms`,
-			);
+			const perf = this._perf;
+			this._perf = undefined;
+			if (!perf) return;
+			perf.push(GLib.get_monotonic_time());
+			const labels = ['grab', 'emit', 'map', 'fit', 'focus', 'show-rest', 'setup-rest', 'paint'];
+			const segments = perf
+				.slice(1)
+				.map((t, i) => `${labels[i] ?? i} ${((t - perf[i]!) / 1000).toFixed(1)}`)
+				.join(', ');
+			this.ext.logger.log(`open timing (ms): ${segments}, total ${((perf.at(-1)! - perf[0]!) / 1000).toFixed(1)}`);
 		});
 
 		this._dialog.ease({
@@ -848,14 +859,17 @@ export class ClipboardDialog extends St.Widget {
 
 	override vfunc_map(): void {
 		super.vfunc_map();
+		this._perf?.push(GLib.get_monotonic_time()); // map
 
 		// Update fit constraint
 		this.updateFitConstraint();
+		this._perf?.push(GLib.get_monotonic_time()); // fit
 
 		// Navigate to first item
 		if (!this._scrollView.navigate_focus(null, St.DirectionType.DOWN, false)) {
 			this._header.updateHeader(true, false);
 			this._header.searchEntry.grab_key_focus();
 		}
+		this._perf?.push(GLib.get_monotonic_time()); // focus
 	}
 }
