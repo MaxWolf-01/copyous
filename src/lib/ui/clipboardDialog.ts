@@ -572,6 +572,9 @@ export class ClipboardDialog extends St.Widget {
 				this._grab = null;
 				this._closing = false;
 				this.hide();
+				// Shrink the window back while hidden so the next open maps
+				// and lays out only the initial chunk
+				this._scrollView.resetWindow();
 				global.compositor.enable_unredirect();
 			},
 		});

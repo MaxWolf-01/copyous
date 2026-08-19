@@ -49,6 +49,10 @@ export class ClipboardScrollView extends St.ScrollView {
 		this.connect('notify::width', this.scrollbarWorkaround.bind(this));
 		this._scrollContainer.connect('notify::width', this.scrollbarWorkaround.bind(this));
 
+		// Reveal more windowed items when scrolling approaches the end
+		this.hadjustment.connect('notify::value', () => this.maybeReveal(this.hadjustment));
+		this.vadjustment.connect('notify::value', () => this.maybeReveal(this.vadjustment));
+
 		// Connect properties
 		this.ext.settings.connectObject(
 			'changed::show-scrollbar',
@@ -102,6 +106,16 @@ export class ClipboardScrollView extends St.ScrollView {
 		this._scrollContainer.activateFirst();
 	}
 
+	public resetWindow() {
+		this._scrollContainer.resetWindow();
+	}
+
+	private maybeReveal(adjustment: St.Adjustment) {
+		if (adjustment.value + adjustment.page_size * 2 >= adjustment.upper) {
+			this._scrollContainer.revealMore();
+		}
+	}
+
 	private updateSize() {
 		this._itemWidth = this.ext.settings.get_int('item-width');
 		this._itemHeight = this.ext.settings.get_int('item-height');
@@ -148,6 +162,7 @@ export class ClipboardScrollView extends St.ScrollView {
 
 		// End
 		if (key === Clutter.KEY_End) {
+			this._scrollContainer.revealAll();
 			const child = get_last_visible_child(this._scrollContainer);
 			if (child) {
 				this._scrollContainer.focusChild(child);

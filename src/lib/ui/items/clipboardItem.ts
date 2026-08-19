@@ -33,6 +33,7 @@ export class ClipboardItem extends St.Button {
 	private _protectPinned: boolean = true;
 	private _protectTagged: boolean = true;
 	private _middleClickAction: MiddleClickAction = MiddleClickAction.None;
+	private _matched: boolean = true;
 
 	private readonly _box: St.Widget;
 	private readonly _header: ClipboardItemHeader;
@@ -135,8 +136,17 @@ export class ClipboardItem extends St.Button {
 		return (focus | hover | active) as ActiveState;
 	}
 
+	/**
+	 * Whether the item matches the current search query. Actual visibility is
+	 * decided by the container, which windows the matched items so that only a
+	 * bounded number of actors is mapped and laid out at a time.
+	 */
+	get matched(): boolean {
+		return this._matched;
+	}
+
 	public search(query: SearchQuery) {
-		this.visible = query.matchesEntry(this.visible, this.entry, this.entry.content);
+		this._matched = query.matchesEntry(this._matched, this.entry, this.entry.content);
 	}
 
 	private updateSize() {

@@ -14,11 +14,17 @@ import { ClipboardItem } from './items/clipboardItem.js';
 import { State, StatusItem } from './items/statusItem.js';
 import { SearchChange, SearchQuery } from './searchEntry.js';
 
+// Number of matched items shown initially and added per reveal step. Only
+// windowed items become actors on screen; mapping and laying out the full
+// history on every open is what froze the shell (#150).
+const WINDOW_CHUNK = 20;
+
 @registerClass()
 export class ClipboardScrollContainer extends St.BoxLayout {
 	private readonly _statusItem: StatusItem;
 	private _lastFocus: Clutter.Actor | null = null;
 	private _lastQuery: SearchQuery | null = null;
+	private _revealed: number = WINDOW_CHUNK;
 
 	constructor(ext: CopyousExtension) {
 		super({
@@ -29,6 +35,48 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 
 		this._statusItem = new StatusItem(ext);
 		this.updateVisible();
+	}
+
+	private applyWindow(): void {
+		let rank = 0;
+		for (const child of this.get_children()) {
+			if (!(child instanceof ClipboardItem)) continue;
+			child.visible = child.matched && rank < this._revealed;
+			if (child.matched) rank++;
+		}
+	}
+
+	public revealMore(): void {
+		if (!this.hasHiddenMatches()) return;
+
+		this.removePseudoclasses();
+		this._revealed += WINDOW_CHUNK;
+		this.applyWindow();
+		this.updateVisible();
+	}
+
+	public revealAll(): void {
+		if (!this.hasHiddenMatches()) return;
+
+		this.removePseudoclasses();
+		this._revealed = Number.MAX_SAFE_INTEGER;
+		this.applyWindow();
+		this.updateVisible();
+	}
+
+	public resetWindow(): void {
+		this._revealed = WINDOW_CHUNK;
+		this.removePseudoclasses();
+		this.applyWindow();
+		this.updateVisible();
+	}
+
+	private hasHiddenMatches(): boolean {
+		let matched = 0;
+		for (const child of this.get_children()) {
+			if (child instanceof ClipboardItem && child.matched) matched++;
+		}
+		return matched > this._revealed;
 	}
 
 	private updateVisible() {
@@ -156,6 +204,7 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 		if (search && this._lastQuery) {
 			this.updateSearch(item);
 		} else {
+			this.applyWindow();
 			this.updateVisible();
 		}
 	}
@@ -186,6 +235,7 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 		}
 
 		this.remove_child(child);
+		this.applyWindow();
 		this.updateVisible();
 
 		if (hasKeyFocus) {
@@ -241,13 +291,22 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 
 		this.removePseudoclasses();
 		let focusChild: ClipboardItem | null = null;
-		let firstVisible: ClipboardItem | null = null;
 		for (const child of this.get_children()) {
 			if (child instanceof ClipboardItem) {
-				const hasFocus = child.has_key_focus();
+				if (child.has_key_focus()) focusChild = child;
 				child.search(query);
-				if (hasFocus) focusChild = child;
-				if (child.visible && firstVisible === null) firstVisible = child;
+			}
+		}
+
+		// A new query starts a fresh window over its matches
+		this._revealed = WINDOW_CHUNK;
+		this.applyWindow();
+
+		let firstVisible: ClipboardItem | null = null;
+		for (const child of this.get_children()) {
+			if (child instanceof ClipboardItem && child.visible) {
+				firstVisible = child;
+				break;
 			}
 		}
 		this.updateVisible();
@@ -267,6 +326,7 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 		const hasKeyFocus = item.has_key_focus();
 		this.removePseudoclasses();
 		item.search(this._lastQuery);
+		this.applyWindow();
 		this.updateVisible();
 		if (hasKeyFocus && !item.visible) this.nextFocus(item, false);
 	}
@@ -308,6 +368,16 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 			this._lastFocus.grab_key_focus();
 			this.scrollToChild(this._lastFocus);
 			return Clutter.EVENT_STOP;
+		}
+
+		// Keyboard navigation past the last revealed item extends the window
+		if (
+			from === get_last_visible_child(this) &&
+			(direction === St.DirectionType.TAB_FORWARD ||
+				direction === St.DirectionType.DOWN ||
+				direction === St.DirectionType.RIGHT)
+		) {
+			this.revealMore();
 		}
 
 		const first = get_first_visible_child(this);
