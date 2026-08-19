@@ -53,6 +53,13 @@ export class ClipboardScrollView extends St.ScrollView {
 		this.hadjustment.connect('notify::value', () => this.maybeReveal(this.hadjustment));
 		this.vadjustment.connect('notify::value', () => this.maybeReveal(this.vadjustment));
 
+		// Without overflow there are no scroll events, so hidden matches would be
+		// unreachable by mouse; keep revealing until the list overflows or runs out
+		this.hadjustment.connect('notify::upper', () => this.fillViewport());
+		this.vadjustment.connect('notify::upper', () => this.fillViewport());
+		this.hadjustment.connect('notify::page-size', () => this.fillViewport());
+		this.vadjustment.connect('notify::page-size', () => this.fillViewport());
+
 		// Connect properties
 		this.ext.settings.connectObject(
 			'changed::show-scrollbar',
@@ -108,6 +115,16 @@ export class ClipboardScrollView extends St.ScrollView {
 
 	public resetWindow() {
 		this._scrollContainer.resetWindow();
+	}
+
+	private fillViewport() {
+		if (!this._scrollContainer.mapped) return;
+
+		const adjustment =
+			this.orientation === Clutter.Orientation.HORIZONTAL ? this.hadjustment : this.vadjustment;
+		if (adjustment.upper <= adjustment.page_size) {
+			this._scrollContainer.revealMore();
+		}
 	}
 
 	private maybeReveal(adjustment: St.Adjustment) {

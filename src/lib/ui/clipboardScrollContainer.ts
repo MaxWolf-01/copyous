@@ -226,16 +226,24 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 		if (child.get_parent() !== this) return;
 
 		const hasKeyFocus = child.has_key_focus();
-		let newFocus = null;
-		if (hasKeyFocus) {
-			newFocus = get_next_visible_sibling(child) ?? get_previous_visible_sibling(child);
-		}
+		const index = this.get_children().indexOf(child);
 
 		this.remove_child(child);
 		this.applyWindow();
 		this.updateVisible();
 
 		if (hasKeyFocus) {
+			// Pick the new focus only after the window is reapplied: removing the
+			// last revealed item reveals its successor, which should get the focus
+			const children = this.get_children();
+			let newFocus: Clutter.Actor | null = null;
+			for (let i = index; i < children.length && !newFocus; i++) {
+				if (children[i]!.visible) newFocus = children[i]!;
+			}
+			for (let i = Math.min(index, children.length) - 1; i >= 0 && !newFocus; i--) {
+				if (children[i]!.visible) newFocus = children[i]!;
+			}
+
 			if (newFocus && newFocus !== this._statusItem) {
 				this.focusChild(newFocus);
 			} else {
@@ -311,6 +319,8 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 			this.focusChild(focusChild, false);
 		} else if (this._lastFocus && this._lastFocus.visible) {
 			this.scrollToChild(this._lastFocus, false);
+		} else if (this._lastFocus instanceof ClipboardItem && this._lastFocus.matched) {
+			// Still matching, only outside the window: don't steal key focus
 		} else if (firstVisible !== null) {
 			this.focusChild(firstVisible, false);
 		}
