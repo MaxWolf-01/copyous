@@ -46,37 +46,33 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 		}
 	}
 
-	public revealMore(): void {
-		if (!this.hasHiddenMatches()) return;
-
+	private setRevealed(revealed: number): void {
 		this.removePseudoclasses();
-		this._revealed += WINDOW_CHUNK;
+		this._revealed = revealed;
 		this.applyWindow();
 		this.updateVisible();
+	}
+
+	public revealMore(): void {
+		if (!this.hasHiddenMatches()) return;
+		this.setRevealed(this._revealed + WINDOW_CHUNK);
 	}
 
 	public revealAll(): void {
 		if (!this.hasHiddenMatches()) return;
-
-		this.removePseudoclasses();
-		this._revealed = Number.MAX_SAFE_INTEGER;
-		this.applyWindow();
-		this.updateVisible();
+		this.setRevealed(Number.MAX_SAFE_INTEGER);
 	}
 
 	public resetWindow(): void {
-		this._revealed = WINDOW_CHUNK;
-		this.removePseudoclasses();
-		this.applyWindow();
-		this.updateVisible();
+		this.setRevealed(WINDOW_CHUNK);
 	}
 
 	private hasHiddenMatches(): boolean {
 		let matched = 0;
 		for (const child of this.get_children()) {
-			if (child instanceof ClipboardItem && child.matched) matched++;
+			if (child instanceof ClipboardItem && child.matched && ++matched > this._revealed) return true;
 		}
-		return matched > this._revealed;
+		return false;
 	}
 
 	private updateVisible() {
@@ -210,6 +206,7 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 	}
 
 	public clearItems(): void {
+		this._revealed = WINDOW_CHUNK;
 		let focus = false;
 		for (const child of this.get_children()) {
 			if (child instanceof ClipboardItem) {
@@ -298,7 +295,6 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 			}
 		}
 
-		// A new query starts a fresh window over its matches
 		this._revealed = WINDOW_CHUNK;
 		this.applyWindow();
 
@@ -371,11 +367,11 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 		}
 
 		// Keyboard navigation past the last revealed item extends the window
+		const forwardKey =
+			this.orientation === Clutter.Orientation.HORIZONTAL ? St.DirectionType.RIGHT : St.DirectionType.DOWN;
 		if (
 			from === get_last_visible_child(this) &&
-			(direction === St.DirectionType.TAB_FORWARD ||
-				direction === St.DirectionType.DOWN ||
-				direction === St.DirectionType.RIGHT)
+			(direction === St.DirectionType.TAB_FORWARD || direction === forwardKey)
 		) {
 			this.revealMore();
 		}

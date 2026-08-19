@@ -14,7 +14,6 @@ import { BackgroundSize, LinkItemSettings } from '../../common/settings.js';
 import { ClipboardEntry, LinkMetadata } from '../../database/database.js';
 import { tryGetLinkImage, tryGetMetadata } from '../../misc/link.js';
 import { ImagePreview } from '../components/contentPreview.js';
-import { SearchQuery } from '../searchEntry.js';
 import { ClipboardItem } from './clipboardItem.js';
 
 const SPACING = 3;
@@ -323,12 +322,12 @@ export class LinkItem extends ClipboardItem {
 		this.updateLinkPreview().catch(() => {});
 	}
 
-	public override search(query: SearchQuery): void {
+	protected override searchTexts(): string[] {
 		const metadata: LinkMetadata = { title: null, description: null, image: null, ...this.entry.metadata };
 		const searchTexts = [this.entry.content];
 		if (metadata.title) searchTexts.push(metadata.title);
 		if (metadata.description) searchTexts.push(metadata.description);
-		this.visible = query.matchesEntry(this.visible, this.entry, ...searchTexts);
+		return searchTexts;
 	}
 
 	private async updateLinkPreview() {

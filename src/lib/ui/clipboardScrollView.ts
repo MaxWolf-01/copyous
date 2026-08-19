@@ -111,9 +111,17 @@ export class ClipboardScrollView extends St.ScrollView {
 	}
 
 	private maybeReveal(adjustment: St.Adjustment) {
-		if (adjustment.value + adjustment.page_size * 2 >= adjustment.upper) {
-			this._scrollContainer.revealMore();
-		}
+		// Adjustment resets while mapping are not user scrolling
+		if (!this._scrollContainer.mapped) return;
+
+		// In RTL horizontal lists the end of the list is at the lower bound
+		const rtl =
+			this.text_direction === Clutter.TextDirection.RTL &&
+			this.orientation === Clutter.Orientation.HORIZONTAL;
+		const nearEnd = rtl
+			? adjustment.value <= adjustment.lower + adjustment.page_size * 2
+			: adjustment.value + adjustment.page_size * 2 >= adjustment.upper;
+		if (nearEnd) this._scrollContainer.revealMore();
 	}
 
 	private updateSize() {

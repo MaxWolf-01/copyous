@@ -23,7 +23,6 @@ import {
 	getFileType,
 	tryCreateFilePreview,
 } from '../components/contentPreview.js';
-import { SearchQuery } from '../searchEntry.js';
 import { ClipboardItem } from './clipboardItem.js';
 
 export function formatFile(file: Gio.File): string {
@@ -71,9 +70,8 @@ export class FileItem extends ClipboardItem {
 		this.updateFilePreview().catch(logger.error.bind(logger));
 	}
 
-	public override search(query: SearchQuery): void {
-		const file = this.entry.content.substring('file://'.length);
-		this.visible = query.matchesEntry(this.visible, this.entry, file, this._file.text);
+	protected override searchTexts(): string[] {
+		return [this.entry.content.substring('file://'.length), this._file.text];
 	}
 
 	private async updateFilePreview() {

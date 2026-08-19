@@ -10,7 +10,6 @@ import { ImageItemSettings } from '../../common/settings.js';
 import { ClipboardEntry } from '../../database/database.js';
 import { ContentInfo, createFileInfo } from '../components/contentInfo.js';
 import { FileType, ImagePreview } from '../components/contentPreview.js';
-import { SearchQuery } from '../searchEntry.js';
 import { ClipboardItem } from './clipboardItem.js';
 
 @registerClass({
@@ -73,8 +72,8 @@ export class ImageItem extends ClipboardItem {
 		this.configureImageInfo();
 	}
 
-	override search(query: SearchQuery): void {
-		this.visible = query.matchesEntry(this.visible, this.entry);
+	protected override searchTexts(): string[] {
+		return [];
 	}
 
 	private updateSettings() {

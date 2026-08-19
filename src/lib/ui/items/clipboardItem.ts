@@ -138,15 +138,19 @@ export class ClipboardItem extends St.Button {
 
 	/**
 	 * Whether the item matches the current search query. Actual visibility is
-	 * decided by the container, which windows the matched items so that only a
-	 * bounded number of actors is mapped and laid out at a time.
+	 * decided by the container, which windows the matched items.
 	 */
 	get matched(): boolean {
 		return this._matched;
 	}
 
 	public search(query: SearchQuery) {
-		this._matched = query.matchesEntry(this._matched, this.entry, this.entry.content);
+		this._matched = query.matchesEntry(this._matched, this.entry, ...this.searchTexts());
+	}
+
+	/** The texts the search query is matched against */
+	protected searchTexts(): string[] {
+		return [this.entry.content];
 	}
 
 	private updateSize() {

@@ -10,7 +10,6 @@ import { registerClass } from '../../common/gjs.js';
 import { Icon } from '../../common/icons.js';
 import { ClipboardEntry } from '../../database/database.js';
 import { ContentPreview } from '../components/contentPreview.js';
-import { SearchQuery } from '../searchEntry.js';
 import { ClipboardItem } from './clipboardItem.js';
 import { formatFile } from './fileItem.js';
 
@@ -163,7 +162,7 @@ export class FilesItem extends ClipboardItem {
 		}
 	}
 
-	public override search(query: SearchQuery): void {
-		this.visible = query.matchesEntry(this.visible, this.entry, ...this._files, ...(this._formattedFiles ?? []));
+	protected override searchTexts(): string[] {
+		return [...this._files, ...(this._formattedFiles ?? [])];
 	}
 }
