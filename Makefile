@@ -70,6 +70,10 @@ lint-fix:
 shexli: $(DIST_ZIP)
 	uv run python -m shexli $< --format json | pnpm tsx ./scripts/shexli/transform-output.ts
 
+# Memory and latency of image previews, in a private headless shell (scripts/memtest/memtest.py --help)
+memtest: $(DIST_ZIP)
+	scripts/memtest/memtest.py --zip $<
+
 # Localization
 resources/po/main.pot: $(SRC)
 	find src -name '*.ts' \

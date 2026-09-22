@@ -164,19 +164,29 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 	public addItem(item: ClipboardItem): void {
 		this.insertOrMoveItem(item);
 
-		// Move item when datetime changes
-		item.entry.connect('notify::datetime', () => this.insertOrMoveItem(item, false));
-
-		// Delete item when deleted
-		item.entry.connect('delete', () => this.removeItem(item));
-
-		// Update search only when properties used by search can change.
-		item.entry.connect('notify::content', () => this.updateSearch(item));
-		item.entry.connect('notify::pinned', () => this.updateSearch(item));
-		item.entry.connect('notify::tag', () => this.updateSearch(item));
-		item.entry.connect('notify::type', () => this.updateSearch(item));
-		item.entry.connect('notify::metadata', () => this.updateSearch(item));
-		item.entry.connect('notify::title', () => this.updateSearch(item));
+		// The connections go with the item: a destroyed item must not be re-inserted or searched
+		item.entry.connectObject(
+			// Move item when datetime changes
+			'notify::datetime',
+			() => this.insertOrMoveItem(item, false),
+			// Delete item when deleted
+			'delete',
+			() => this.removeItem(item),
+			// Update search only when properties used by search can change.
+			'notify::content',
+			() => this.updateSearch(item),
+			'notify::pinned',
+			() => this.updateSearch(item),
+			'notify::tag',
+			() => this.updateSearch(item),
+			'notify::type',
+			() => this.updateSearch(item),
+			'notify::metadata',
+			() => this.updateSearch(item),
+			'notify::title',
+			() => this.updateSearch(item),
+			item,
+		);
 	}
 
 	private insertOrMoveItem(item: ClipboardItem, search: boolean = true): void {
@@ -211,7 +221,8 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 		for (const child of this.get_children()) {
 			if (child instanceof ClipboardItem) {
 				focus ||= child.has_key_focus();
-				this.remove_child(child);
+				// Destroyed, not just removed: an item still connected to the settings never gets collected
+				child.destroy();
 			}
 		}
 		this.updateVisible();
@@ -228,7 +239,7 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 		const hasKeyFocus = child.has_key_focus();
 		const index = this.get_children().indexOf(child);
 
-		this.remove_child(child);
+		child.destroy();
 		this.applyWindow();
 		this.updateVisible();
 
