@@ -40,11 +40,6 @@
 
 			.image-box {
 				border-radius: $base_border_radius;
-				background-size: cover;
-			}
-
-			&.contain .image-box {
-				background-size: contain;
 			}
 
 			&.missing-image {

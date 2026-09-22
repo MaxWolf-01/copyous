@@ -1,4 +1,5 @@
 import Clutter from 'gi://Clutter';
+import Cogl from 'gi://Cogl';
 import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import GdkPixbuf from 'gi://GdkPixbuf';
@@ -37,6 +38,190 @@ export class ContentPreview extends St.BoxLayout {
 	}
 }
 
+Gio._promisify(Gio.File.prototype, 'read_async');
+
+async function decodeAtSize(
+	file: Gio.File,
+	width: number,
+	height: number,
+	cancellable: Gio.Cancellable,
+): Promise<GdkPixbuf.Pixbuf> {
+	const stream = await file.read_async(GLib.PRIORITY_DEFAULT, cancellable);
+	try {
+		// Decodes in a worker thread
+		return await new Promise((resolve, reject) => {
+			GdkPixbuf.Pixbuf.new_from_stream_at_scale_async(stream, width, height, false, cancellable, (_, result) => {
+				try {
+					resolve(GdkPixbuf.Pixbuf.new_from_stream_finish(result));
+				} catch (error) {
+					reject(error as Error);
+				}
+			});
+		});
+	} finally {
+		stream.close(null);
+	}
+}
+
+/**
+ * Size at which an image fills (cover) or fits inside (contain) a box
+ */
+function scaledSize(width: number, height: number, boxWidth: number, boxHeight: number, cover: boolean) {
+	const scale = (cover ? Math.max : Math.min)(boxWidth / width, boxHeight / height);
+	const round = cover ? Math.ceil : Math.floor;
+	return [Math.max(1, round(width * scale)), Math.max(1, round(height * scale))] as const;
+}
+
+/**
+ * Loads an image the way CSS paints a centered `background-image` into a box: scaled to cover or to be contained,
+ * what overflows cropped, the rest transparent.
+ * @returns a pixbuf of exactly `boxWidth` by `boxHeight` with an alpha channel
+ */
+async function loadIntoBox(
+	file: Gio.File,
+	[width, height]: readonly [number, number],
+	[boxWidth, boxHeight]: readonly [number, number],
+	cover: boolean,
+	cancellable: Gio.Cancellable,
+): Promise<GdkPixbuf.Pixbuf> {
+	const load = async (w: number, h: number) => {
+		const pixbuf = await decodeAtSize(file, w, h, cancellable);
+		return pixbuf.apply_embedded_orientation() ?? pixbuf;
+	};
+
+	const [w, h] = scaledSize(width, height, boxWidth, boxHeight, cover);
+	let pixbuf = await load(w, h);
+	if (pixbuf.width !== w) {
+		// The orientation tag turned the image by a quarter, which only shows once it is decoded
+		const [turnedWidth, turnedHeight] = scaledSize(height, width, boxWidth, boxHeight, cover);
+		pixbuf = await load(turnedHeight, turnedWidth);
+	}
+
+	const box = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, true, 8, boxWidth, boxHeight);
+	box.fill(0);
+	const copyWidth = Math.min(pixbuf.width, boxWidth);
+	const copyHeight = Math.min(pixbuf.height, boxHeight);
+	pixbuf.copy_area(
+		Math.floor((pixbuf.width - copyWidth) / 2),
+		Math.floor((pixbuf.height - copyHeight) / 2),
+		copyWidth,
+		copyHeight,
+		box,
+		Math.floor((boxWidth - copyWidth) / 2),
+		Math.floor((boxHeight - copyHeight) / 2),
+	);
+	return box;
+}
+
+/**
+ * Makes the RGBA pixels outside rounded corners transparent
+ * @param radii The radius of each corner in pixels, indexed by `St.Corner`
+ */
+function roundCorners(pixels: Uint8Array, width: number, height: number, rowstride: number, radii: number[]) {
+	radii.forEach((cornerRadius, corner) => {
+		const radius = Math.min(cornerRadius, width / 2, height / 2);
+		const right = corner === (St.Corner.TOPRIGHT as number) || corner === (St.Corner.BOTTOMRIGHT as number);
+		const bottom = corner === (St.Corner.BOTTOMLEFT as number) || corner === (St.Corner.BOTTOMRIGHT as number);
+
+		for (let y = 0; y < radius; y++) {
+			for (let x = 0; x < radius; x++) {
+				const distance = Math.hypot(radius - x - 0.5, radius - y - 0.5);
+				const coverage = Math.clamp(radius - distance + 0.5, 0, 1);
+				const column = right ? width - 1 - x : x;
+				const row = bottom ? height - 1 - y : y;
+				pixels[row * rowstride + column * 4 + 3]! *= coverage;
+			}
+		}
+	});
+}
+
+/**
+ * Shows an image file as a texture of exactly the size it is drawn at.
+ *
+ * A CSS `background-image` would go through `St.TextureCache`, which decodes on the main thread at the full image
+ * size times the scale factor and keeps the result until the shell exits, even after the file is deleted.
+ */
+@registerClass()
+class ImageBox extends St.Widget {
+	private _cover: boolean = true;
+	private _cancellable: Gio.Cancellable | null = null;
+
+	// What the content, or the load in flight, was made for
+	private _shown: string = '';
+
+	constructor(
+		private readonly _file: Gio.File,
+		private readonly _imageSize: readonly [number, number],
+		private readonly _onError: (error: unknown) => void,
+	) {
+		super({
+			style_class: 'image-box',
+			x_align: Clutter.ActorAlign.FILL,
+			y_align: Clutter.ActorAlign.FILL,
+			x_expand: true,
+			y_expand: true,
+		});
+
+		this.connect('notify::mapped', this.update.bind(this));
+		this.connect('style-changed', this.update.bind(this));
+		this.connect('resource-scale-changed', this.update.bind(this));
+		this.connect('destroy', () => this._cancellable?.cancel());
+	}
+
+	set cover(cover: boolean) {
+		this._cover = cover;
+		this.update();
+	}
+
+	/** Whether the content shown is the one for the current size, scale and corners */
+	get loaded(): boolean {
+		return this._shown !== '' && this._cancellable === null;
+	}
+
+	override vfunc_allocate(box: Clutter.ActorBox): void {
+		super.vfunc_allocate(box);
+		this.update();
+	}
+
+	private update() {
+		// The theme node and the resource scale are only known on the stage
+		if (!this.mapped) return;
+
+		const scale = this.get_resource_scale();
+		const width = Math.ceil(this.width * scale);
+		const height = Math.ceil(this.height * scale);
+		if (width === 0 || height === 0) return;
+
+		const themeNode = this.get_theme_node();
+		const corners = [St.Corner.TOPLEFT, St.Corner.TOPRIGHT, St.Corner.BOTTOMRIGHT, St.Corner.BOTTOMLEFT];
+		const radii = corners.map((corner) => themeNode.get_border_radius(corner) * scale);
+
+		const shown = [width, height, this._cover, ...radii].join();
+		if (shown === this._shown) return;
+		this._shown = shown;
+
+		this._cancellable?.cancel();
+		const cancellable = new Gio.Cancellable();
+		this._cancellable = cancellable;
+		loadIntoBox(this._file, this._imageSize, [width, height], this._cover, cancellable)
+			.then((pixbuf) => {
+				if (cancellable.is_cancelled()) return;
+
+				const pixels = pixbuf.get_pixels();
+				roundCorners(pixels, width, height, pixbuf.rowstride, radii);
+
+				const content = new St.ImageContent({ preferred_width: this.width, preferred_height: this.height });
+				const context = global.stage.context.get_backend().get_cogl_context();
+				content.set_bytes(context, pixels, Cogl.PixelFormat.RGBA_8888, width, height, pixbuf.rowstride);
+				this.set_content(content);
+				this._cancellable = null;
+			})
+			.catch((error) => {
+				if (!cancellable.is_cancelled()) this._onError(error);
+			});
+	}
+}
+
 @registerClass({
 	Properties: {
 		'background-size': enumParamSpec(
@@ -50,10 +235,14 @@ export class ContentPreview extends St.BoxLayout {
 })
 export class ImagePreview extends ContentPreview {
 	private _backgroundSize: BackgroundSize = BackgroundSize.Cover;
-	private readonly _ratio: number | null;
-	private readonly _effect?: Clutter.BrightnessContrastEffect;
+	private _ratio: number | null = null;
+	private _imageBox: ImageBox | undefined;
+	private _effect: Clutter.BrightnessContrastEffect | undefined;
 
-	constructor(ext: Extension, image: Gio.File) {
+	constructor(
+		private readonly ext: Extension,
+		image: Gio.File,
+	) {
 		super();
 
 		this.add_style_class_name('image-preview');
@@ -63,29 +252,33 @@ export class ImagePreview extends ContentPreview {
 				const [, width, height] = GdkPixbuf.Pixbuf.get_file_info(image.get_path()!);
 				this._ratio = height / width;
 
-				const imageBox = new St.Widget({
-					style_class: 'image-box',
-					x_align: Clutter.ActorAlign.FILL,
-					y_align: Clutter.ActorAlign.FILL,
-					x_expand: true,
-					y_expand: true,
-					style: `background-image: url("${image.get_uri()}");`,
+				this._imageBox = new ImageBox(image, [width, height], (error) => {
+					ext.getLogger().error(error);
+					this.showMissingImage();
 				});
-				this.add_child(imageBox);
+				this.add_child(this._imageBox);
 
 				this._effect = new Clutter.BrightnessContrastEffect();
-				imageBox.add_effect(this._effect);
+				this._imageBox.add_effect(this._effect);
 				return;
 			} catch {
 				// Ignore
 			}
 		}
 
+		this.showMissingImage();
+	}
+
+	private showMissingImage() {
+		this._imageBox?.destroy();
+		this._imageBox = undefined;
+		this._effect = undefined;
 		this._ratio = null;
+
 		this.add_style_class_name('missing-image');
 		this.add_child(
 			new St.Icon({
-				gicon: loadIcon(ext, Icon.MissingImage),
+				gicon: loadIcon(this.ext, Icon.MissingImage),
 				x_align: Clutter.ActorAlign.CENTER,
 				y_align: Clutter.ActorAlign.CENTER,
 				x_expand: true,
@@ -103,11 +296,7 @@ export class ImagePreview extends ContentPreview {
 		this._backgroundSize = backgroundSize;
 		this.notify('background-size');
 
-		if (backgroundSize === BackgroundSize.Cover) {
-			this.remove_style_class_name('contain');
-		} else {
-			this.add_style_class_name('contain');
-		}
+		if (this._imageBox) this._imageBox.cover = backgroundSize === BackgroundSize.Cover;
 	}
 
 	set active(active: ActiveState) {
@@ -179,7 +368,6 @@ export class TextPreview extends ContentPreview {
 }
 
 Gio._promisify(Gio.File.prototype, 'enumerate_children_async');
-Gio._promisify(Gio.File.prototype, 'read_async');
 Gio._promisify(Gio.InputStream.prototype, 'read_bytes_async');
 
 /**
