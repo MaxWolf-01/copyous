@@ -33,7 +33,7 @@ endif
 # Targets
 .PHONY: all clean
 .PHONY: database
-.PHONY: lint
+.PHONY: lint test
 .PHONY: pot po check-pot check-po
 .PHONY: build install uninstall
 .PHONY: launch launch-profile launch-settings
@@ -66,6 +66,9 @@ lint:
 lint-fix:
 	pnpm exec eslint src --ext .ts --fix
 	pnpm exec prettier src resources/css --write
+
+test:
+	pnpm exec tsx --test tests/*.test.ts tests/properties/*.test.ts
 
 shexli: $(DIST_ZIP)
 	uv run python -m shexli $< --format json | pnpm tsx ./scripts/shexli/transform-output.ts
