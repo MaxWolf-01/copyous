@@ -13,6 +13,7 @@ import { ActiveState } from '../../common/constants.js';
 import { enumParamSpec, flagsParamSpec, registerClass } from '../../common/gjs.js';
 import { Icon, loadIcon } from '../../common/icons.js';
 import { BackgroundSize, FilePreviewType } from '../../common/settings.js';
+import { getImageSize } from '../../misc/image.js';
 import { CodeLabel, CodeLabelConstructorProps } from './codeLabel.js';
 
 export const FileType = {
@@ -48,7 +49,7 @@ async function decodeAtSize(
 ): Promise<GdkPixbuf.Pixbuf> {
 	const stream = await file.read_async(GLib.PRIORITY_DEFAULT, cancellable);
 	try {
-		// Decodes in a worker thread
+		// Decodes in a worker thread; queueDecode says what it still costs the main thread
 		return await new Promise((resolve, reject) => {
 			GdkPixbuf.Pixbuf.new_from_stream_at_scale_async(stream, width, height, false, cancellable, (_, result) => {
 				try {
@@ -135,6 +136,67 @@ function roundCorners(pixels: Uint8Array, width: number, height: number, rowstri
 	});
 }
 
+// Where GdkPixbuf loads images through glycin, a decode blocks the shell's main thread for about as long as it takes,
+// tens of milliseconds: a dropped frame while the list scrolls or fades in, unnoticed while it stands still. Decodes
+// therefore run one at a time, each once the list has not moved for STILL_MS. The pause between two decodes lets
+// frames run, and with them the input that marks the list as moving.
+const STILL_MS = 300;
+const PAUSE_MS = 100;
+let lastMoved = 0;
+let decodes: Promise<unknown> = Promise.resolve();
+
+/** Marks the list as moving; image decodes wait until it has stood still */
+export function holdImageDecodes() {
+	lastMoved = GLib.get_monotonic_time();
+}
+
+function after(ms: number): Promise<void> {
+	return new Promise((resolve) => {
+		GLib.timeout_add(GLib.PRIORITY_DEFAULT, ms, () => {
+			resolve();
+			return GLib.SOURCE_REMOVE;
+		});
+	});
+}
+
+async function whenStill(): Promise<void> {
+	await after(PAUSE_MS);
+	const wait = Math.ceil((lastMoved - GLib.get_monotonic_time()) / 1000) + STILL_MS;
+	if (wait > 0) await after(wait).then(whenStill);
+}
+
+function queueDecode<T>(decode: () => Promise<T>): Promise<T> {
+	const decoded = decodes.then(whenStill).then(decode);
+	decodes = decoded.catch(() => {});
+	return decoded;
+}
+
+/**
+ * The most recently shown previews, by file and by what they were made for. Every screen unlock disables and enables
+ * the extension, which re-creates all items; without these their previews are decoded again on the next open, and
+ * each decode costs the shell's main thread time. Bounded, so it does not grow with the history.
+ */
+const recentPreviews = new Map<string, St.ImageContent>();
+const RECENT_PREVIEWS = 8;
+
+function recentPreview(key: string): St.ImageContent | undefined {
+	const content = recentPreviews.get(key);
+	if (content) {
+		// Most recently used last
+		recentPreviews.delete(key);
+		recentPreviews.set(key, content);
+	}
+	return content;
+}
+
+function rememberPreview(key: string, content: St.ImageContent) {
+	recentPreviews.set(key, content);
+	for (const oldest of recentPreviews.keys()) {
+		if (recentPreviews.size <= RECENT_PREVIEWS) break;
+		recentPreviews.delete(oldest);
+	}
+}
+
 /**
  * Shows an image file as a texture of exactly the size it is drawn at.
  *
@@ -144,6 +206,7 @@ function roundCorners(pixels: Uint8Array, width: number, height: number, rowstri
 @registerClass()
 class ImageBox extends St.Widget {
 	private _cover: boolean = true;
+	private _imageSize: readonly [number, number] | null = null;
 	private _cancellable: Gio.Cancellable | null = null;
 
 	// What the content, or the load in flight, was made for
@@ -151,7 +214,6 @@ class ImageBox extends St.Widget {
 
 	constructor(
 		private readonly _file: Gio.File,
-		private readonly _imageSize: readonly [number, number],
 		private readonly _onError: (error: unknown) => void,
 	) {
 		super({
@@ -173,6 +235,12 @@ class ImageBox extends St.Widget {
 		this.update();
 	}
 
+	/** The width and height of the image file; nothing is decoded before they are known */
+	set imageSize(size: readonly [number, number]) {
+		this._imageSize = size;
+		this.update();
+	}
+
 	/** Whether the content shown is the one for the current size, scale and corners */
 	get loaded(): boolean {
 		return this._shown !== '' && this._cancellable === null;
@@ -185,7 +253,7 @@ class ImageBox extends St.Widget {
 
 	private update() {
 		// The theme node and the resource scale are only known on the stage
-		if (!this.mapped) return;
+		if (!this.mapped || !this._imageSize) return;
 
 		const scale = this.get_resource_scale();
 		const width = Math.ceil(this.width * scale);
@@ -201,11 +269,23 @@ class ImageBox extends St.Widget {
 		this._shown = shown;
 
 		this._cancellable?.cancel();
+		this._cancellable = null;
+
+		const key = `${this._file.get_uri()} ${shown}`;
+		const recent = recentPreview(key);
+		if (recent) {
+			this.set_content(recent);
+			return;
+		}
+
 		const cancellable = new Gio.Cancellable();
 		this._cancellable = cancellable;
-		loadIntoBox(this._file, this._imageSize, [width, height], this._cover, cancellable)
+		const [imageSize, cover] = [this._imageSize, this._cover];
+		queueDecode(async () =>
+			cancellable.is_cancelled() ? null : loadIntoBox(this._file, imageSize, [width, height], cover, cancellable),
+		)
 			.then((pixbuf) => {
-				if (cancellable.is_cancelled()) return;
+				if (!pixbuf || cancellable.is_cancelled()) return;
 
 				const pixels = pixbuf.get_pixels();
 				roundCorners(pixels, width, height, pixbuf.rowstride, radii);
@@ -213,6 +293,7 @@ class ImageBox extends St.Widget {
 				const content = new St.ImageContent({ preferred_width: this.width, preferred_height: this.height });
 				const context = global.stage.context.get_backend().get_cogl_context();
 				content.set_bytes(context, pixels, Cogl.PixelFormat.RGBA_8888, width, height, pixbuf.rowstride);
+				rememberPreview(key, content);
 				this.set_content(content);
 				this._cancellable = null;
 			})
@@ -238,6 +319,7 @@ export class ImagePreview extends ContentPreview {
 	private _ratio: number | null = null;
 	private _imageBox: ImageBox | undefined;
 	private _effect: Clutter.BrightnessContrastEffect | undefined;
+	private readonly _cancellable: Gio.Cancellable = new Gio.Cancellable();
 
 	constructor(
 		private readonly ext: Extension,
@@ -247,26 +329,26 @@ export class ImagePreview extends ContentPreview {
 
 		this.add_style_class_name('image-preview');
 
-		if (image.query_exists(null)) {
-			try {
-				const [, width, height] = GdkPixbuf.Pixbuf.get_file_info(image.get_path()!);
+		this._imageBox = new ImageBox(image, (error) => {
+			ext.getLogger().error(error);
+			this.showMissingImage();
+		});
+		this.add_child(this._imageBox);
+
+		this._effect = new Clutter.BrightnessContrastEffect();
+		this._imageBox.add_effect(this._effect);
+
+		this.connect('destroy', () => this._cancellable.cancel());
+		getImageSize(image, this._cancellable)
+			.then(([width, height]) => {
+				if (!this._imageBox) return;
 				this._ratio = height / width;
-
-				this._imageBox = new ImageBox(image, [width, height], (error) => {
-					ext.getLogger().error(error);
-					this.showMissingImage();
-				});
-				this.add_child(this._imageBox);
-
-				this._effect = new Clutter.BrightnessContrastEffect();
-				this._imageBox.add_effect(this._effect);
-				return;
-			} catch {
-				// Ignore
-			}
-		}
-
-		this.showMissingImage();
+				this._imageBox.imageSize = [width, height];
+				this.queue_relayout();
+			})
+			.catch(() => {
+				if (!this._cancellable.is_cancelled()) this.showMissingImage();
+			});
 	}
 
 	private showMissingImage() {

@@ -74,6 +74,10 @@ shexli: $(DIST_ZIP)
 memtest: $(DIST_ZIP)
 	scripts/memtest/memtest.py --zip $<
 
+# Open and scroll latency, in a private headless shell (scripts/perftest/perftest.py --help)
+perftest: $(DIST_ZIP)
+	scripts/perftest/perftest.py --zip $<
+
 # Localization
 resources/po/main.pot: $(SRC)
 	find src -name '*.ts' \

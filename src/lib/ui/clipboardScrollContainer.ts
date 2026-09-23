@@ -1,4 +1,6 @@
 import Clutter from 'gi://Clutter';
+import GLib from 'gi://GLib';
+import Meta from 'gi://Meta';
 import St from 'gi://St';
 
 import type CopyousExtension from '../../extension.js';
@@ -14,17 +16,26 @@ import { ClipboardItem } from './items/clipboardItem.js';
 import { State, StatusItem } from './items/statusItem.js';
 import { SearchChange, SearchQuery } from './searchEntry.js';
 
-// Number of matched items shown initially and added per reveal step. Only
+// Number of matched items shown when the dialog opens: enough to fill it. Only
 // windowed items become actors on screen; mapping and laying out the full
 // history on every open is what froze the shell (#150).
-const WINDOW_CHUNK = 20;
+const WINDOW_START = 10;
+
+// Matched items revealed per frame once the dialog is open, while fewer than
+// REVEAL_AHEAD pages of them lie beyond the visible part. An item shown for the
+// first time costs a few ms of style, layout and paint; revealing twenty in one
+// frame froze scrolling for over 100 ms. Scrolling reveals further.
+const REVEAL_STEP = 2;
+const REVEAL_AHEAD = 3;
 
 @registerClass()
 export class ClipboardScrollContainer extends St.BoxLayout {
 	private readonly _statusItem: StatusItem;
 	private _lastFocus: Clutter.Actor | null = null;
 	private _lastQuery: SearchQuery | null = null;
-	private _revealed: number = WINDOW_CHUNK;
+	private _revealed: number = WINDOW_START;
+	private _revealLaterId: number = 0;
+	private _prewarmId: number = 0;
 
 	constructor(ext: CopyousExtension) {
 		super({
@@ -35,6 +46,12 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 
 		this._statusItem = new StatusItem(ext);
 		this.updateVisible();
+
+		this.connect('destroy', () => {
+			this.stopRevealing();
+			if (this._prewarmId) GLib.source_remove(this._prewarmId);
+			this._prewarmId = 0;
+		});
 	}
 
 	private applyWindow(): void {
@@ -55,7 +72,7 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 
 	public revealMore(): void {
 		if (!this.hasHiddenMatches()) return;
-		this.setRevealed(this._revealed + WINDOW_CHUNK);
+		this.setRevealed(this._revealed + REVEAL_STEP);
 	}
 
 	public revealAll(): void {
@@ -63,8 +80,65 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 		this.setRevealed(Number.MAX_SAFE_INTEGER);
 	}
 
+	/** Reveals hidden matches a few per frame, before each frame's layout, until REVEAL_AHEAD pages are ready */
+	public revealProgressively(): void {
+		if (this._revealLaterId || !this.wantsMore()) return;
+
+		this._revealLaterId = global.compositor.get_laters().add(Meta.LaterType.BEFORE_REDRAW, () => {
+			if (this.wantsMore()) {
+				this.setRevealed(this._revealed + REVEAL_STEP);
+				return GLib.SOURCE_CONTINUE;
+			}
+
+			this._revealLaterId = 0;
+			return GLib.SOURCE_REMOVE;
+		});
+	}
+
+	private wantsMore(): boolean {
+		if (!this.mapped || !this.hasHiddenMatches()) return false;
+
+		const horizontal = this.orientation === Clutter.Orientation.HORIZONTAL;
+		const adjustment = horizontal ? this.hadjustment : this.vadjustment;
+		// In RTL horizontal lists the end of the list is at the lower bound
+		const ahead =
+			horizontal && this.text_direction === Clutter.TextDirection.RTL
+				? adjustment.value - adjustment.lower
+				: adjustment.upper - adjustment.value - adjustment.page_size;
+		return ahead < REVEAL_AHEAD * adjustment.page_size;
+	}
+
+	private stopRevealing(): void {
+		if (this._revealLaterId) global.compositor.get_laters().remove(this._revealLaterId);
+		this._revealLaterId = 0;
+	}
+
 	public resetWindow(): void {
-		this.setRevealed(WINDOW_CHUNK);
+		this.stopRevealing();
+		this.setRevealed(WINDOW_START);
+	}
+
+	/**
+	 * Computes the styles and text layouts of the items the next open shows, one item per idle, while the dialog is
+	 * hidden. Items created by enable(), which every screen unlock calls, otherwise all pay for them in the first
+	 * frame of the next open.
+	 */
+	public prewarm(): void {
+		if (this._prewarmId || this.mapped) return;
+
+		// Items keep arriving while enable() loads the history, so the list is looked up again on every step
+		let next = 0;
+		this._prewarmId = GLib.idle_add(GLib.PRIORITY_LOW, () => {
+			const items = this.get_children().filter((c) => c instanceof ClipboardItem && c.visible);
+			const item = items[next++];
+			if (item instanceof ClipboardItem && !this.mapped) {
+				item.prewarm();
+				return GLib.SOURCE_CONTINUE;
+			}
+
+			this._prewarmId = 0;
+			return GLib.SOURCE_REMOVE;
+		});
 	}
 
 	private hasHiddenMatches(): boolean {
@@ -161,9 +235,21 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 		}
 	}
 
-	public addItem(item: ClipboardItem): void {
-		this.insertOrMoveItem(item);
+	/** Adds items at their place by date, then applies the search and the window once for all of them */
+	public addItems(items: ClipboardItem[]): void {
+		if (items.length === 0) return;
 
+		this.removePseudoclasses();
+		for (const item of items) {
+			this.placeItem(item);
+			this.connectEntry(item);
+			if (this._lastQuery) item.search(this._lastQuery);
+		}
+		this.applyWindow();
+		this.updateVisible();
+	}
+
+	private connectEntry(item: ClipboardItem): void {
 		// The connections go with the item: a destroyed item must not be re-inserted or searched
 		item.entry.connectObject(
 			// Move item when datetime changes
@@ -189,23 +275,31 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 		);
 	}
 
-	private insertOrMoveItem(item: ClipboardItem, search: boolean = true): void {
-		this.removePseudoclasses();
-
+	/** Puts the item before the first one that is not newer */
+	private placeItem(item: ClipboardItem): void {
 		if (item.get_parent() === this) this.remove_child(item);
+
+		// A loaded history arrives newest first, so each item belongs after all the others: no need to look
+		const last = this.get_last_child();
+		if (last instanceof ClipboardItem && last.entry.datetime.compare(item.entry.datetime) > 0) {
+			this.add_child(item);
+			return;
+		}
 
 		let i = 0;
 		for (const c of this.get_children()) {
 			if (c instanceof ClipboardItem && c.entry.datetime.compare(item.entry.datetime) <= 0) {
 				this.insert_child_at_index(item, i);
-				break;
+				return;
 			}
 			i++;
 		}
+		this.add_child(item);
+	}
 
-		if (i === this.get_n_children()) {
-			this.add_child(item);
-		}
+	private insertOrMoveItem(item: ClipboardItem, search: boolean = true): void {
+		this.removePseudoclasses();
+		this.placeItem(item);
 
 		if (search && this._lastQuery) {
 			this.updateSearch(item);
@@ -216,7 +310,7 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 	}
 
 	public clearItems(): void {
-		this._revealed = WINDOW_CHUNK;
+		this._revealed = WINDOW_START;
 		let focus = false;
 		for (const child of this.get_children()) {
 			if (child instanceof ClipboardItem) {
@@ -314,8 +408,9 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 			}
 		}
 
-		this._revealed = WINDOW_CHUNK;
+		this._revealed = WINDOW_START;
 		this.applyWindow();
+		this.revealProgressively();
 
 		let firstVisible: ClipboardItem | null = null;
 		for (const child of this.get_children()) {

@@ -6,6 +6,7 @@ import type CopyousExtension from '../../extension.js';
 import { enumParamSpec, registerClass } from '../common/gjs.js';
 import { get_first_visible_child, get_last_visible_child } from '../misc/actor.js';
 import { ClipboardScrollContainer } from './clipboardScrollContainer.js';
+import { holdImageDecodes } from './components/contentPreview.js';
 import { ClipboardItem } from './items/clipboardItem.js';
 import { SearchQuery } from './searchEntry.js';
 
@@ -49,9 +50,9 @@ export class ClipboardScrollView extends St.ScrollView {
 		this.connect('notify::width', this.scrollbarWorkaround.bind(this));
 		this._scrollContainer.connect('notify::width', this.scrollbarWorkaround.bind(this));
 
-		// Reveal more windowed items when scrolling approaches the end
-		this.hadjustment.connect('notify::value', () => this.maybeReveal(this.hadjustment));
-		this.vadjustment.connect('notify::value', () => this.maybeReveal(this.vadjustment));
+		// Reveal more windowed items as scrolling approaches the end
+		this.hadjustment.connect('notify::value', () => this.onScrolled());
+		this.vadjustment.connect('notify::value', () => this.onScrolled());
 
 		// Without overflow there are no scroll events, so hidden matches would be
 		// unreachable by mouse; keep revealing until the list overflows or runs out
@@ -89,8 +90,8 @@ export class ClipboardScrollView extends St.ScrollView {
 		this.updateScrollbar();
 	}
 
-	public addItem(item: ClipboardItem) {
-		this._scrollContainer.addItem(item);
+	public addItems(items: ClipboardItem[]) {
+		this._scrollContainer.addItems(items);
 	}
 
 	public clearItems() {
@@ -117,28 +118,29 @@ export class ClipboardScrollView extends St.ScrollView {
 		this._scrollContainer.resetWindow();
 	}
 
+	public revealProgressively() {
+		this._scrollContainer.revealProgressively();
+	}
+
+	public prewarm() {
+		this._scrollContainer.prewarm();
+	}
+
 	private fillViewport() {
 		if (!this._scrollContainer.mapped) return;
 
-		const adjustment =
-			this.orientation === Clutter.Orientation.HORIZONTAL ? this.hadjustment : this.vadjustment;
+		const adjustment = this.orientation === Clutter.Orientation.HORIZONTAL ? this.hadjustment : this.vadjustment;
 		if (adjustment.upper <= adjustment.page_size) {
 			this._scrollContainer.revealMore();
 		}
 	}
 
-	private maybeReveal(adjustment: St.Adjustment) {
+	private onScrolled() {
 		// Adjustment resets while mapping are not user scrolling
 		if (!this._scrollContainer.mapped) return;
 
-		// In RTL horizontal lists the end of the list is at the lower bound
-		const rtl =
-			this.text_direction === Clutter.TextDirection.RTL &&
-			this.orientation === Clutter.Orientation.HORIZONTAL;
-		const nearEnd = rtl
-			? adjustment.value <= adjustment.lower + adjustment.page_size * 2
-			: adjustment.value + adjustment.page_size * 2 >= adjustment.upper;
-		if (nearEnd) this._scrollContainer.revealMore();
+		holdImageDecodes();
+		this._scrollContainer.revealProgressively();
 	}
 
 	private updateSize() {

@@ -37,6 +37,7 @@ export class ClipboardItem extends St.Button {
 
 	private readonly _box: St.Widget;
 	private readonly _header: ClipboardItemHeader;
+	private readonly _holeEffect: HoleEffect;
 	protected _content: St.BoxLayout;
 
 	constructor(
@@ -67,13 +68,14 @@ export class ClipboardItem extends St.Button {
 		this._header = new ClipboardItemHeader(ext, icon, title);
 		this._box.add_child(this._header);
 
+		this._holeEffect = new HoleEffect(this._header.buttons);
 		this._content = new St.BoxLayout({
 			style_class: 'clipboard-item-content',
 			orientation: Clutter.Orientation.VERTICAL,
 			x_expand: true,
 			y_expand: true,
 			clip_to_allocation: true,
-			effect: new HoleEffect(this._header.buttons),
+			effect: this._holeEffect,
 		});
 		this._box.add_child(this._content);
 
@@ -148,6 +150,16 @@ export class ClipboardItem extends St.Button {
 		this._matched = query.matchesEntry(this._matched, this.entry, ...this.searchTexts());
 	}
 
+	/** Computes styles and text layout while hidden, which the first frame that shows the item would otherwise do */
+	public prewarm() {
+		const computeStyles = (actor: Clutter.Actor) => {
+			if (actor instanceof St.Widget) actor.get_theme_node();
+			actor.get_children().forEach(computeStyles);
+		};
+		computeStyles(this);
+		this.get_preferred_height(this.width);
+	}
+
 	/** The texts the search query is matched against */
 	protected searchTexts(): string[] {
 		return [this.entry.content];
@@ -189,6 +201,7 @@ export class ClipboardItem extends St.Button {
 		this._header.headerVisible = show;
 		this._header.showTitle = this.ext.settings.get_boolean('show-item-title');
 		this._header.controlsVisibility = this.ext.settings.get_enum('header-controls-visibility');
+		this._holeEffect.overlay = !show;
 
 		if (show) {
 			this.remove_style_class_name('no-header');
@@ -325,6 +338,7 @@ export class ClipboardItem extends St.Button {
 class HoleEffect extends Shell.GLSLEffect {
 	private readonly _sizeLocation: number;
 	private readonly _holeBoxLocation: number;
+	private _overlay: boolean = true;
 
 	constructor(private target: Clutter.Actor) {
 		super();
@@ -332,7 +346,21 @@ class HoleEffect extends Shell.GLSLEffect {
 		this._sizeLocation = this.get_uniform_location('size');
 		this._holeBoxLocation = this.get_uniform_location('hole_box');
 
-		target.connect('notify::allocation', () => this.queue_repaint());
+		target.connect('notify::allocation', () => this.update());
+		this.update();
+	}
+
+	/** Whether the target is drawn over the actor, which is the only case with a hole to cut */
+	set overlay(overlay: boolean) {
+		this._overlay = overlay;
+		this.update();
+	}
+
+	private update() {
+		// Enabled, the effect draws the actor into a texture of its own first; without a hole that is all it does
+		const [width, height] = this.target.allocation.get_size();
+		this.enabled = this._overlay && width > 0 && height > 0;
+		this.queue_repaint();
 	}
 
 	override vfunc_paint_target(node: Clutter.PaintNode, paintContext: Clutter.PaintContext): void {

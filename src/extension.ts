@@ -264,9 +264,7 @@ export default class CopyousExtension extends Extension {
 
 		this.clipboardDialog?.clearEntries();
 		const entries = await this.entryTracker.init();
-		for (const entry of entries) {
-			this.clipboardDialog?.addEntry(entry);
-		}
+		this.clipboardDialog?.addEntries(entries);
 	}
 
 	private async initHistoryTimeout() {
