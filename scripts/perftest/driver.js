@@ -3,11 +3,17 @@
 const UUID = 'copyous@boerdereinar.dev';
 const now = () => GLib.get_monotonic_time();
 const ext = () => Main.extensionManager.lookup(UUID).stateObj;
+// The list of the dialog; builds before the list had a model called it _scrollContainer
+const list = () => {
+	const view = ext().clipboardDialog._scrollView;
+	return view.list ?? view._scrollContainer;
+};
 
 globalThis.perf?.stopFrames();
 
 const seat = Clutter.get_default_backend().get_default_seat();
 const pointer = seat.create_virtual_device(Clutter.InputDeviceType.POINTER_DEVICE);
+const keyboard = seat.create_virtual_device(Clutter.InputDeviceType.KEYBOARD_DEVICE);
 
 globalThis.perf = {
 	frames: [],
@@ -40,7 +46,7 @@ globalThis.perf = {
 		let last = now();
 		this._stallId = GLib.timeout_add(GLib.PRIORITY_HIGH, 1, () => {
 			const t = now();
-			if (t - last > 17000) this._blocks.push((t - last) / 1000);
+			if (t - last > 17000) this._blocks.push([last, t]);
 			last = t;
 			return GLib.SOURCE_CONTINUE;
 		});
@@ -52,10 +58,17 @@ globalThis.perf = {
 		this._stallId = 0;
 	},
 
+	/** How long the main thread was blocked, in total and at most at once, in ms; and when, [start, end] in µs */
 	stalls() {
 		this.stopStalls();
 		const blocks = this._blocks ?? [];
-		return { blocked: blocks.reduce((a, b) => a + b, 0), longest: Math.max(0, ...blocks), end: now() };
+		const durations = blocks.map(([start, end]) => (end - start) / 1000);
+		return {
+			blocked: durations.reduce((a, b) => a + b, 0),
+			longest: Math.max(0, ...durations),
+			blocks,
+			end: now(),
+		};
 	},
 
 	move(x, y) {
@@ -98,7 +111,7 @@ globalThis.perf = {
 	},
 
 	listState() {
-		const c = ext().clipboardDialog._scrollView._scrollContainer;
+		const c = list();
 		const a = c.vadjustment;
 		return {
 			children: c.get_n_children(),
@@ -106,6 +119,32 @@ globalThis.perf = {
 			value: Math.round(a.value),
 			upper: Math.round(a.upper),
 		};
+	},
+
+	/** Types `text` into the search entry, one character every intervalMs, then clears it at once */
+	typeSearch(text, intervalMs) {
+		const entry = ext().clipboardDialog._header.searchEntry;
+		this.keys = [];
+		this.typing = true;
+		let i = 0;
+		GLib.timeout_add(GLib.PRIORITY_DEFAULT, intervalMs, () => {
+			const t0 = now();
+			entry.text = text.slice(0, ++i % (text.length + 1));
+			this.keys.push([t0, now()]);
+			if (i <= text.length) return GLib.SOURCE_CONTINUE;
+			this.typing = false;
+			return GLib.SOURCE_REMOVE;
+		});
+		return now();
+	},
+
+	/** Presses and releases a key (a Clutter keyval) as the keyboard would; returns [before, after] the press */
+	key(keyval) {
+		const t0 = now();
+		keyboard.notify_keyval(t0, keyval, Clutter.KeyState.PRESSED);
+		const t1 = now();
+		keyboard.notify_keyval(t1, keyval, Clutter.KeyState.RELEASED);
+		return [t0, t1];
 	},
 
 	/** True once the history is loaded and highlight.js is in, else what is missing */
@@ -116,8 +155,9 @@ globalThis.perf = {
 			return `extension not enabled (state ${state}, session mode ${Main.sessionMode.currentMode})`;
 		}
 		if (e.hljs === undefined) return 'highlight.js pending';
-		const n = e.clipboardDialog._scrollView._scrollContainer.get_n_children();
-		return n > 1 || `history pending (${n} children)`;
+		const c = list();
+		const n = c._history ? c._history.size : c.get_n_children() - 1;
+		return n > 0 || `history pending (${n} entries)`;
 	},
 
 	/** What a screen lock and unlock do: disable() and enable() on the loaded extension, settings untouched */
