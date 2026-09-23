@@ -1,6 +1,5 @@
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
-import GObject from 'gi://GObject';
 import Meta from 'gi://Meta';
 import St from 'gi://St';
 
@@ -18,9 +17,9 @@ import { ClipboardItem } from './items/clipboardItem.js';
 import { searchTexts } from './items/items.js';
 import { State, StatusItem } from './items/statusItem.js';
 
-// Matches the window shows from the start or the end of the list: enough to fill the dialog. Only the window's
-// entries have their items shown; an item costs about a millisecond to build and holds its widgets and textures, so
-// the length of the history must not decide how many exist (#150).
+// The window shows this many matches from the start or the end of the list, enough to fill the dialog. Only the
+// window's entries have their items shown. An item costs about a millisecond to build and holds its widgets and
+// textures, so the length of the history must not decide how many exist (#150).
 const WINDOW = 10;
 
 // Matches revealed per frame once the dialog is open, while fewer than REVEAL_AHEAD pages of them lie beyond the
@@ -29,32 +28,34 @@ const WINDOW = 10;
 const REVEAL_STEP = 2;
 const REVEAL_AHEAD = 3;
 
-// Items are built in idle time for this many matches beyond either end of the window, so revealing them only shows
-// them. Of the items that left the window, the KEEP most recently shown stay; the rest are destroyed, EVICT_STEP per
-// idle.
+// Items are built in idle time for BUILD_AHEAD matches beyond either end of the window, so that revealing them only
+// shows them. Of the items that left the window, the KEEP most recently shown stay built for a return; the others
+// are destroyed, EVICT_STEP per idle.
 const BUILD_AHEAD = 20;
 const KEEP = 20;
 const EVICT_STEP = 4;
 
 /**
- * The list of the dialog: the items of the entries in the window of the history, in order. The history, the search
- * and the window are the HistoryList's; this builds, shows, orders and destroys the items that make them visible,
- * and keeps the scroll position on what the user looks at while the list changes around it.
+ * The list of the dialog. The history, its search and its window are the HistoryList's; this builds, shows, orders
+ * and destroys the items that show the window's entries, and keeps in place what the user looks at while the list
+ * changes around it.
  */
 @registerClass()
 export class ClipboardScrollContainer extends St.BoxLayout {
 	private readonly _history = new HistoryList<ClipboardEntry>(searchTexts, WINDOW);
+	private readonly _entries = new Set<ClipboardEntry>();
 	/** Least recently shown first */
 	private readonly _items = new Map<ClipboardEntry, ClipboardItem>();
 	private readonly _unbuildable = new WeakSet<ClipboardEntry>();
-	private readonly _subscriptions = new Map<ClipboardEntry, number[]>();
 	private readonly _statusItem: StatusItem;
 
+	/** The items shown, in order */
+	private _shown: ClipboardItem[] = [];
+	private _first: St.Widget | null = null;
+	private _last: St.Widget | null = null;
 	private _lastFocus: Clutter.Actor | null = null;
 	private _scrollTarget: { child: Clutter.Actor; animate: boolean } | null = null;
 	private _revealedBack = false;
-	private _reconciling = false;
-	private _stale = false;
 	private _revealLaterId = 0;
 	private _revealAhead = 0;
 	private _buildId = 0;
@@ -72,40 +73,48 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 		this._statusItem = new StatusItem(ext);
 		this.reconcile(0);
 
+		// The entries' signals are disconnected with the list, which owns them
 		this.connect('destroy', () => {
 			this.stopRevealing();
 			if (this._buildId) GLib.source_remove(this._buildId);
 			this._buildId = 0;
-			for (const entry of [...this._subscriptions.keys()]) this.unsubscribe(entry);
 			if (this._statusItem.get_parent() === null) this._statusItem.destroy();
 		});
 	}
 
-	/** Replaces the history */
-	public setEntries(entries: readonly ClipboardEntry[]): void {
-		const focused = this.focusedItem() !== null;
-		for (const entry of [...this._subscriptions.keys()]) this.unsubscribe(entry);
-		for (const [entry, item] of this._items) this.destroyItem(entry, item);
-
-		this._history.set(entries);
-		for (const entry of entries) this.subscribe(entry);
-		this.reconcile(this.now);
-		if (focused) this.focusSearch();
+	/** Adds entries, a loaded history, to those already there, such as ones copied while it loaded */
+	public addEntries(entries: readonly ClipboardEntry[]): void {
+		for (const entry of entries) {
+			if (!this._entries.has(entry)) this.subscribe(entry);
+		}
+		this._history.set([...this._entries]);
+		this.reconcile(this.buildNow);
 	}
 
 	/** Adds a new entry, or one whose content was copied again */
 	public addEntry(entry: ClipboardEntry): void {
-		if (!this._subscriptions.has(entry)) this.subscribe(entry);
+		if (!this._entries.has(entry)) this.subscribe(entry);
 		this.change(entry, () => this._history.add(entry));
+	}
+
+	public clear(): void {
+		const focused = this.focusedItem() !== null;
+		for (const entry of this._entries) entry.disconnectObject(this);
+		this._entries.clear();
+		for (const [entry, item] of this._items) this.destroyItem(entry, item);
+
+		this._history.set([]);
+		this.reconcile(0);
+		if (focused) this.focusSearch();
 	}
 
 	public search(query: SearchQuery): void {
 		const focused = this.focusedItem();
 		this._history.search(query);
-		this.reconcile(this.now);
+		this.reconcile(this.buildNow);
 		this.revealProgressively();
 
-		const first = this.visibleItems()[0];
+		const first = this._shown[0];
 		if (focused?.visible) {
 			this.focusChild(focused, false);
 		} else if (this._lastFocus?.visible) {
@@ -132,14 +141,14 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 	public home(): void {
 		this._history.toStart();
 		this.reconcile(Infinity);
-		const first = this.visibleItems()[0];
+		const first = this._shown[0];
 		if (first) this.focusChild(first);
 	}
 
 	public end(): void {
 		this._history.toEnd();
 		this.reconcile(Infinity);
-		const last = this.visibleItems().at(-1);
+		const last = this._shown.at(-1);
 		if (last) this.focusChild(last);
 	}
 
@@ -162,8 +171,14 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 		});
 	}
 
+	/** Focuses the match at `index`, counted from the newest */
 	public selectItem(index: number): boolean {
-		const item = this.visibleItems()[index];
+		if (!this._history.atStart) {
+			this._history.toStart();
+			this.reconcile(Infinity);
+		}
+
+		const item = this._shown[index];
 		if (!item) return false;
 
 		this.focusChild(item);
@@ -173,17 +188,17 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 	public selectNextItem() {
 		const focused = this.focusedItem();
 		if (focused === null) {
-			const first = this.visibleItems()[0];
+			const first = this._shown[0];
 			if (first) this.focusChild(first);
 			return;
 		}
 
-		if (focused === get_last_visible_child(this) && this._history.extend(REVEAL_STEP)) this.reconcile(Infinity);
+		if (focused === this._shown.at(-1) && this._history.extend(REVEAL_STEP)) this.reconcile(Infinity);
 		this.nextFocus(focused);
 	}
 
 	public activateFirst(): void {
-		this.visibleItems()[0]?.vfunc_clicked(1);
+		this._shown[0]?.vfunc_clicked(1);
 	}
 
 	public focusChild(child: Clutter.Actor, animate: boolean = true): void {
@@ -205,17 +220,16 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 	public scrollToChild(child: Clutter.Actor, animate: boolean = true): void {
 		if (child.get_parent() !== this) return;
 
-		// A child shown this frame has no place yet: scroll once the layout gave it one
+		// A child shown this frame has no allocation yet; it is scrolled to after the layout that gives it one
 		if (!child.has_allocation()) {
 			this._scrollTarget = { child, animate };
 			this.queue_relayout();
 			return;
 		}
 
-		const box = child.get_allocation_box();
 		const adjustment = this.adjustment;
-		const [start, size] = this.horizontal ? [box.x1, box.get_width()] : [box.y1, box.get_height()];
-		const value = this.valueAt(adjustment, start + size * 0.5 - adjustment.page_size * 0.5);
+		const [start, end] = this.span(child);
+		const value = this.valueAt(adjustment, (start + end) / 2 - adjustment.page_size / 2);
 
 		if (animate) {
 			adjustment.ease(value, { duration: 150, mode: Clutter.AnimationMode.EASE_OUT_QUAD });
@@ -232,24 +246,34 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 		return this.horizontal ? this.hadjustment : this.vadjustment;
 	}
 
-	/** How far the list is scrolled from its start: in a right-to-left horizontal list, against the value */
-	private offset(adjustment: St.Adjustment, value: number = adjustment.value): number {
-		const rtl = this.horizontal && this.text_direction === Clutter.TextDirection.RTL;
-		return rtl ? adjustment.upper - adjustment.page_size - value : value;
-	}
-
-	private valueAt(adjustment: St.Adjustment, offset: number): number {
-		return this.offset(adjustment, offset);
-	}
-
-	/** How many missing items to build now: all while the list is shown; none while hidden, where idle time does */
-	private get now(): number {
+	/** How many missing items to build now: all while the list is shown, none while it is hidden */
+	private get buildNow(): number {
 		return this.mapped ? Infinity : 0;
 	}
 
 	/**
-	 * One frame's step: builds up to REVEAL_STEP items the window still lacks, else reveals REVEAL_STEP more matches
-	 * where fewer than enough of them are ready. Returns whether there is more to do.
+	 * How far the content is moved to scroll it by `value`, in the content's coordinates. A right-to-left horizontal
+	 * list starts at its right end, so the value counts from there.
+	 */
+	private translation(adjustment: St.Adjustment, value: number = adjustment.value): number {
+		const rtl = this.horizontal && this.text_direction === Clutter.TextDirection.RTL;
+		return rtl ? adjustment.upper - adjustment.page_size - value : value;
+	}
+
+	/** The value that moves the content by `translation`, the inverse of translation() */
+	private valueAt(adjustment: St.Adjustment, translation: number): number {
+		return this.translation(adjustment, translation);
+	}
+
+	/** Where a child begins and ends along the list, in the content's coordinates */
+	private span(child: Clutter.Actor): [number, number] {
+		const box = child.get_allocation_box();
+		return this.horizontal ? [box.x1, box.x2] : [box.y1, box.y2];
+	}
+
+	/**
+	 * One frame's step. Builds up to REVEAL_STEP items the window still lacks, or else reveals REVEAL_STEP more
+	 * matches at an end with fewer than `_revealAhead` pages of them ready. Returns whether there is more to do.
 	 */
 	private reveal(): boolean {
 		if (!this.mapped) return false;
@@ -259,10 +283,11 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 			return true;
 		}
 
+		// The value counts from the start of the list, in either direction
 		const adjustment = this.adjustment;
 		const ahead = this._revealAhead * adjustment.page_size;
-		const before = this.offset(adjustment);
-		const after = adjustment.upper - adjustment.page_size - before;
+		const before = adjustment.value;
+		const after = adjustment.upper - adjustment.page_size - adjustment.value;
 
 		let revealed = after <= ahead && this._history.extend(REVEAL_STEP);
 		if (before <= ahead && this._history.extendBack(REVEAL_STEP)) {
@@ -277,32 +302,43 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 	private stopRevealing(): void {
 		if (this._revealLaterId) global.compositor.get_laters().remove(this._revealLaterId);
 		this._revealLaterId = 0;
+		this._revealAhead = 0;
 	}
 
 	private subscribe(entry: ClipboardEntry): void {
-		this._subscriptions.set(entry, [
-			entry.connect('notify', (_: unknown, pspec: GObject.ParamSpec) => {
-				// A new time is a copy of the same content: the entry moves; any other property can change what a
-				// search finds
-				if (pspec.get_name() === 'datetime') this.change(entry, () => this._history.add(entry));
-				else this.change(entry, () => this._history.update(entry));
-			}),
-			entry.connect('delete', () => {
-				this.unsubscribe(entry);
+		const update = () => this.change(entry, () => this._history.update(entry));
+		this._entries.add(entry);
+		entry.connectObject(
+			// Copying the same content again gives the entry a new time, and a new place
+			'notify::datetime',
+			() => this.change(entry, () => this._history.add(entry)),
+			// What a search looks at
+			'notify::content',
+			update,
+			'notify::metadata',
+			update,
+			'notify::title',
+			update,
+			'notify::type',
+			update,
+			'notify::pinned',
+			update,
+			'notify::tag',
+			update,
+			'delete',
+			() => {
+				entry.disconnectObject(this);
+				this._entries.delete(entry);
 				this.change(entry, () => this._history.remove(entry));
-			}),
-		]);
-	}
-
-	private unsubscribe(entry: ClipboardEntry): void {
-		for (const id of this._subscriptions.get(entry) ?? []) entry.disconnect(id);
-		this._subscriptions.delete(entry);
+			},
+			this,
+		);
 	}
 
 	/** Applies a change of the history; key focus on an item that leaves the list goes to the one in its place */
 	private change(entry: ClipboardEntry, apply: () => void): void {
 		const item = this._items.get(entry);
-		const focus = item?.has_key_focus() ? this.visibleItems().indexOf(item) : -1;
+		const focus = item?.has_key_focus() ? this._shown.indexOf(item) : -1;
 
 		apply();
 		const removed = item !== undefined && !this._history.has(entry);
@@ -314,58 +350,53 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 
 	/**
 	 * Shows the items of the window's entries, in order, and hides the others
-	 * @param build How many missing items of the window to build now, first ones first, a few ms each; the others are
-	 * built in idle time
+	 * @param budget How many missing items of the window to build now, first ones first, a few ms each; the others
+	 * are built in idle time
 	 */
-	private reconcile(build: number): void {
-		// Building an item can change its entry (a detected language, fetched link metadata), which comes back here
-		if (this._reconciling) {
-			this._stale = true;
-			return;
+	private reconcile(budget: number): void {
+		const shown: ClipboardItem[] = [];
+		for (const entry of this._history.shown) {
+			let item = this._items.get(entry) ?? null;
+			if (!item && budget > 0) {
+				budget--;
+				item = this.build(entry);
+			}
+			if (item) shown.push(item);
 		}
 
-		this._reconciling = true;
-		try {
-			do {
-				this._stale = false;
-				this.showWindow(build);
-			} while (this._stale);
-		} finally {
-			this._reconciling = false;
-		}
-
+		this.display(shown);
+		this.updateStatus();
+		this.updatePseudoclasses();
 		this.scheduleBuild();
 	}
 
-	private showWindow(build: number): void {
-		this.removePseudoclasses();
+	/** Makes `shown` the items shown, touching only those that come, go or move */
+	private display(shown: ClipboardItem[]): void {
+		const was = new Set(this._shown);
+		const is = new Set(shown);
 
-		const shown: ClipboardItem[] = [];
-		for (const entry of this._history.shown) {
-			const item = this._items.get(entry) ?? (build-- > 0 ? this.build(entry) : null);
-			if (!item) continue;
+		for (const item of this._shown) {
+			if (is.has(item)) continue;
 
-			this._items.delete(entry);
-			this._items.set(entry, item);
-			shown.push(item);
+			item.visible = false;
+			// Least recently shown first
+			this._items.delete(item.entry);
+			this._items.set(item.entry, item);
 		}
 
-		const visible = new Set(shown);
-		for (const item of this._items.values()) item.visible = visible.has(item);
+		// Items that stay keep their order among themselves, unless one of their entries moved
+		const stay = shown.filter((item) => was.has(item));
+		const moved = this._shown.filter((item) => is.has(item)).some((item, i) => item !== stay[i]);
+		shown.forEach((item, i) => {
+			if (was.has(item) && !moved) return;
 
-		// Built items join the list at its end, moved entries keep their place: only the shown ones need to be in order
-		const current = this.visibleItems();
-		if (current.length !== shown.length || current.some((item, i) => item !== shown[i])) {
-			let previous: ClipboardItem | null = null;
-			for (const item of shown) {
-				if (previous) this.set_child_above_sibling(item, previous);
-				else this.set_child_below_sibling(item, null);
-				previous = item;
-			}
-		}
+			const previous = shown[i - 1];
+			if (previous) this.set_child_above_sibling(item, previous);
+			else this.set_child_below_sibling(item, null);
+			item.visible = true;
+		});
 
-		this.updateStatus();
-		this.updatePseudoclasses();
+		this._shown = shown;
 	}
 
 	private build(entry: ClipboardEntry): ClipboardItem | null {
@@ -385,6 +416,9 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 
 	private destroyItem(entry: ClipboardEntry, item: ClipboardItem): void {
 		this._items.delete(entry);
+		this._shown = this._shown.filter((shown) => shown !== item);
+		if (this._first === item) this._first = null;
+		if (this._last === item) this._last = null;
 		if (this._lastFocus === item) this._lastFocus = null;
 		if (this._scrollTarget?.child === item) this._scrollTarget = null;
 
@@ -404,8 +438,9 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 	}
 
 	/**
-	 * One item's worth of idle work: builds a missing item of the window, else one near it, which is also given its
-	 * styles and layout while hidden; else destroys a few items no longer needed. Returns whether there was work.
+	 * One item's worth of idle work. Builds a missing item of the window, or else of the matches near it, and gives
+	 * it its styles and layout while it is hidden; or else destroys a few items no longer needed. Returns whether
+	 * there was work.
 	 */
 	private buildStep(): boolean {
 		const entry = [
@@ -424,7 +459,7 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 	}
 
 	private evict(): boolean {
-		const limit = this._history.shown.length + 2 * BUILD_AHEAD + KEEP;
+		const limit = this._shown.length + 2 * BUILD_AHEAD + KEEP;
 		if (this._items.size <= limit) return false;
 
 		const near = new Set(this._history.around(-BUILD_AHEAD, BUILD_AHEAD));
@@ -452,18 +487,22 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 		}
 	}
 
-	private removePseudoclasses(): void {
-		(get_first_visible_child(this) as St.Widget | null)?.remove_style_pseudo_class('first-child');
-		(get_last_visible_child(this) as St.Widget | null)?.remove_style_pseudo_class('last-child');
-	}
-
+	/** Moves :first-child and :last-child to the first and last item shown, restyling only those that change */
 	private updatePseudoclasses(): void {
-		(get_first_visible_child(this) as St.Widget | null)?.add_style_pseudo_class('first-child');
-		(get_last_visible_child(this) as St.Widget | null)?.add_style_pseudo_class('last-child');
-	}
+		const status = this._statusItem.get_parent() === this ? this._statusItem : null;
+		const first = this._shown[0] ?? status;
+		const last = this._shown.at(-1) ?? status;
 
-	private visibleItems(): ClipboardItem[] {
-		return this.get_children().filter((c): c is ClipboardItem => c instanceof ClipboardItem && c.visible);
+		if (first !== this._first) {
+			this._first?.remove_style_pseudo_class('first-child');
+			first?.add_style_pseudo_class('first-child');
+			this._first = first;
+		}
+		if (last !== this._last) {
+			this._last?.remove_style_pseudo_class('last-child');
+			last?.add_style_pseudo_class('last-child');
+			this._last = last;
+		}
 	}
 
 	private focusedItem(): ClipboardItem | null {
@@ -472,8 +511,7 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 	}
 
 	private focusAt(index: number): void {
-		const items = this.visibleItems();
-		const item = items[Math.min(index, items.length - 1)];
+		const item = this._shown[Math.min(index, this._shown.length - 1)];
 		if (item) {
 			this.focusChild(item);
 		} else {
@@ -537,9 +575,9 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 		const backward =
 			direction === St.DirectionType.TAB_BACKWARD ||
 			direction === (this.horizontal ? St.DirectionType.LEFT : St.DirectionType.UP);
-		if (forward && from === get_last_visible_child(this) && this._history.extend(REVEAL_STEP)) {
+		if (forward && from === this._shown.at(-1) && this._history.extend(REVEAL_STEP)) {
 			this.reconcile(Infinity);
-		} else if (backward && from === get_first_visible_child(this) && this._history.extendBack(REVEAL_STEP)) {
+		} else if (backward && from === this._shown[0] && this._history.extendBack(REVEAL_STEP)) {
 			this._revealedBack = true;
 			this.reconcile(Infinity);
 		}
@@ -606,11 +644,11 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 
 	override vfunc_allocate(box: Clutter.ActorBox): void {
 		const adjustment = this.adjustment;
-		const offset = this.offset(adjustment);
-		const anchor = this._scrollTarget ? null : this.anchor(adjustment, offset);
+		const translation = this.translation(adjustment);
+		const anchor = this._scrollTarget ? null : this.anchor(adjustment, translation);
 		const transition = anchor ? adjustment.get_transition('value') : null;
 		const animation = transition && {
-			to: this.offset(adjustment, transition.interval.final as unknown as number),
+			to: this.translation(adjustment, transition.interval.final as unknown as number),
 			left: transition.get_duration() - transition.get_elapsed_time(),
 		};
 
@@ -623,15 +661,18 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 			if (child.get_parent() === this && child.visible) this.scrollToChild(child, animate);
 			return;
 		}
+		if (!anchor?.child.visible) return;
 
-		const delta = anchor && anchor.child.visible ? this.start(anchor.child) - anchor.start : 0;
-		if (delta === 0) return;
+		// Content changed in front of what is in view. The view follows it, and a scroll animation in progress goes on
+		// to its target, moved as much. In a right-to-left list the value changes even when the child does not move.
+		const shift = this.span(anchor.child)[0] - anchor.start;
+		const value = this.valueAt(adjustment, translation + shift);
+		if (value === adjustment.value) return;
 
-		// Content changed in front of what is in view: scroll along, and let a scroll animation reach its target
 		adjustment.remove_transition('value');
-		adjustment.value = this.valueAt(adjustment, offset + delta);
+		adjustment.value = value;
 		if (animation && animation.left > 0) {
-			adjustment.ease(this.valueAt(adjustment, animation.to + delta), {
+			adjustment.ease(this.valueAt(adjustment, animation.to + shift), {
 				duration: animation.left,
 				mode: Clutter.AnimationMode.EASE_OUT_QUAD,
 			});
@@ -639,25 +680,19 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 	}
 
 	/**
-	 * The child that keeps its place on screen when the layout changes: the first one in view. None at the start of
-	 * the list, where what is added in front shows, unless it was revealed for scrolling back into.
+	 * The child that keeps its place on screen when the layout changes, the first one in view. There is none at the
+	 * start of the list, so that what is added in front shows, unless it was revealed to scroll back into.
 	 */
-	private anchor(adjustment: St.Adjustment, offset: number): { child: Clutter.Actor; start: number } | null {
-		if (!this.mapped || (offset <= 0 && !this._revealedBack)) return null;
+	private anchor(adjustment: St.Adjustment, translation: number): { child: Clutter.Actor; start: number } | null {
+		if (!this.mapped || (adjustment.value <= 0 && !this._revealedBack)) return null;
 
-		for (const child of this.get_children()) {
-			if (!child.visible || !child.has_allocation()) continue;
+		for (const child of this._shown) {
+			if (!child.has_allocation()) continue;
 
-			const box = child.get_allocation_box();
-			const [start, end] = this.horizontal ? [box.x1, box.x2] : [box.y1, box.y2];
-			if (end > offset && start < offset + adjustment.page_size) return { child, start };
+			const [start, end] = this.span(child);
+			if (end > translation && start < translation + adjustment.page_size) return { child, start };
 		}
 		return null;
-	}
-
-	private start(child: Clutter.Actor): number {
-		const box = child.get_allocation_box();
-		return this.horizontal ? box.x1 : box.y1;
 	}
 
 	override vfunc_map(): void {

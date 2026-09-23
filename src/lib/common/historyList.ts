@@ -1,7 +1,6 @@
 /**
- * The clipboard history as the dialog lists it: every entry, newest first; which of them match the search query;
- * and the window, the run of matches that is shown. Only the window becomes items (widgets), so the length of the
- * history costs nothing but this bookkeeping, a few microseconds per entry.
+ * The clipboard history as the dialog lists it. It holds every entry, newest first, which of them match the search
+ * query, and the window, the run of matches the dialog shows.
  *
  * Free of GObject, so it runs under node for the tests.
  */
@@ -24,9 +23,11 @@ export interface SearchQuery {
 	readonly text: string;
 	/** Only pinned entries */
 	readonly pinned: boolean;
+	/** No pinned entries, unless `pinned` */
 	readonly excludePinned: boolean;
 	/** Only entries with this tag */
 	readonly tag: Tag | null;
+	/** No tagged entries, unless `tag` */
 	readonly excludeTagged: boolean;
 	/** Only entries of this type */
 	readonly type: ItemType | null;
@@ -41,20 +42,41 @@ export const MatchAll: SearchQuery = {
 	type: null,
 };
 
+// The accents a locale collator ignores when it compares base letters, which Unicode decomposition leaves as marks
+// after them: those of Latin, Greek and Cyrillic, the voicing of kana, the points of Hebrew, the vowels of Arabic, the
+// nukta of Indic scripts. Other marks, such as the vowel signs of Devanagari, change the letter and stay.
+/* eslint-disable no-misleading-character-class -- the class holds combining marks alone, on purpose */
+const ACCENTS =
+	/[\p{M}&&[\u0300-\u036f\u1ab0-\u1aff\u1dc0-\u1dff\u20d0-\u20ff\ufe20-\ufe2f\u3099\u309a\u0591-\u05c7\u064b-\u065f\u0670\u093c\u09bc\u0a3c\u0abc\u0b3c\u0cbc]]/gv;
+/* eslint-enable no-misleading-character-class */
+
+// Letters the collator treats as a base letter with an accent, which Unicode does not decompose
+const BASE_LETTERS: Record<string, string> = { ø: 'o', ł: 'l', đ: 'd', ħ: 'h', ς: 'σ' };
+
 /**
- * Lower case without accents and compatibility forms, so "É", "é" and "e" are the same letter to a search, and a
- * substring test is a case- and accent-insensitive search.
+ * A text in the form search compares, where a substring test finds what a locale collator comparing base letters
+ * would. Letters are lower case, without accents and compatibility forms, and katakana are hiragana.
  */
 export function fold(text: string): string {
 	// eslint-disable-next-line no-control-regex
 	if (/^[\x00-\x7f]*$/.test(text)) return text.toLowerCase();
-	return text.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase();
+
+	return (
+		text
+			.normalize('NFKD')
+			// Й is a letter of its own, not И with a breve
+			.replace(/([иИ])\u0306/g, (_, i: string) => (i === 'и' ? 'й' : 'Й'))
+			.replace(ACCENTS, '')
+			.toLowerCase()
+			.replace(/[øłđħς]/g, (letter) => BASE_LETTERS[letter]!)
+			.replace(/[\u30a1-\u30f6]/g, (katakana) => String.fromCharCode(katakana.charCodeAt(0) - 0x60))
+	);
 }
 
 interface Row<E> {
 	readonly entry: E;
 	matched: boolean;
-	/** The texts search looks at, folded; computed on the first search that needs them */
+	/** The texts search looks at, folded, once a search needed them */
 	folded: string | undefined;
 }
 
@@ -72,7 +94,7 @@ export class HistoryList<E extends ListEntry> {
 	 */
 	constructor(
 		private readonly texts: (entry: E) => readonly string[],
-		readonly windowSize: number,
+		private readonly windowSize: number,
 	) {}
 
 	/** The entries in the window, newest first */
@@ -88,17 +110,15 @@ export class HistoryList<E extends ListEntry> {
 		return this._matches.length;
 	}
 
-	/** Whether matches precede the window */
-	get hasBefore(): boolean {
-		return this._start > 0;
+	/** Whether the window starts at the first match */
+	get atStart(): boolean {
+		return this._start === 0;
 	}
 
-	/** Whether matches follow the window */
-	get hasAfter(): boolean {
-		return this._end < this._matches.length;
-	}
-
-	/** The matches from `from` to `to` (exclusive) positions around the window: negative before it, beyond after it */
+	/**
+	 * The matches from `from` positions after the window's start to `to` positions after its end. A negative `from`
+	 * reaches before the window, a negative `to` stops short of its end.
+	 */
 	around(from: number, to: number): readonly E[] {
 		return this._matches.slice(Math.max(0, this._start + from), Math.max(0, this._end + to));
 	}
@@ -112,9 +132,9 @@ export class HistoryList<E extends ListEntry> {
 		return this._matches.includes(entry);
 	}
 
-	/** Replaces the history; the window goes back to the start */
+	/** Replaces the entries, which are matched against the current search query; the window goes back to the start */
 	set(entries: readonly E[]): void {
-		// Stable: entries of the same time keep their order
+		// The sort is stable, so entries of the same time keep their order
 		this._rows = [...entries]
 			.sort((a, b) => b.datetime.compare(a.datetime))
 			.map((entry) => ({ entry, matched: false, folded: undefined }));
@@ -130,7 +150,7 @@ export class HistoryList<E extends ListEntry> {
 			const row = old >= 0 ? this._rows.splice(old, 1)[0]! : { entry, matched: false, folded: undefined };
 			if (old >= 0 && anchor > old) anchor--;
 
-			// Before the first entry that is not newer: of the same time, the latest added comes first
+			// Before the first entry that is not newer, so of entries of the same time the latest added comes first
 			let i = 0;
 			while (i < this._rows.length && this._rows[i]!.entry.datetime.compare(entry.datetime) > 0) i++;
 			this._rows.splice(i, 0, row);
@@ -151,7 +171,7 @@ export class HistoryList<E extends ListEntry> {
 		});
 	}
 
-	/** Matches an entry again after a property search looks at changed */
+	/** Matches an entry again, after a property a search looks at changed */
 	update(entry: E): void {
 		const i = this.rowOf(entry);
 		if (i < 0) return;
@@ -189,13 +209,13 @@ export class HistoryList<E extends ListEntry> {
 		return true;
 	}
 
-	/** The first `windowSize` matches */
+	/** The window shows the first matches */
 	toStart(): void {
 		this._start = 0;
 		this._end = Math.min(this.windowSize, this._matches.length);
 	}
 
-	/** The last `windowSize` matches */
+	/** The window shows the last matches */
 	toEnd(): void {
 		this._end = this._matches.length;
 		this._start = Math.max(0, this._end - this.windowSize);
@@ -219,8 +239,9 @@ export class HistoryList<E extends ListEntry> {
 	}
 
 	/**
-	 * Applies a change to the rows, keeping the window on the entries it showed: a window at the start stays there,
-	 * showing what is now first; any other window keeps its first entry, or what took its place, and its length.
+	 * Applies a change to the rows and keeps the window where it was. A window at the start stays there and shows what
+	 * is now first. Any other window keeps its length and starts at its first entry, or, if that entry left or moved,
+	 * at the next match after where it was.
 	 * @param change Changes the rows and returns where the row of the window's first entry went
 	 */
 	private edit(change: (anchor: number) => number): void {

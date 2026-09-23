@@ -242,12 +242,13 @@ def open_metrics(t0: int, t1: int, frames: list) -> dict:
 
 
 def key_metrics(keys: list, frames: list, stalls: dict) -> dict:
-    """keys: [before, after] each keystroke's synchronous handling; stalls: the main thread's blocks meanwhile"""
+    """keys: [before, after] each keystroke's synchronous handling; stalls: the main thread's blocks meanwhile. A
+    keystroke no frame followed has no latency."""
     ends = [f[1] for f in frames]
-    latencies = [(next((e for e in ends if e > t1), t1) - t0) / 1000 for t0, t1 in keys]
+    latencies = [(e - t0) / 1000 for t0, t1 in keys if (e := next((e for e in ends if e > t1), None))]
     return {
-        "latency": statistics.median(latencies),
-        "worst": max(latencies),
+        "latency": statistics.median(latencies) if latencies else None,
+        "worst": max(latencies, default=None),
         "longest": stalls["longest"],
         "blocks": stalls["blocks"],
     }
@@ -406,8 +407,9 @@ def run(args: Args, run_dir: Path) -> tuple[list[Phase], Path | None]:
 
 
 def profile_by_phase(capture: Path, phases: list[Phase], top: int) -> dict[str, list[tuple[str, int, int]]]:
-    """Per phase name: (function, self samples, total samples), heaviest total first. Phases that watched the main
-    thread's blocks also get "<phase> blocked": only the samples taken while it was blocked, what caused the blocks."""
+    """Per phase name: (function, self samples, total samples), heaviest total first. A phase that watched the main
+    thread's blocks also gets "<phase> blocked", from the samples taken while the thread was blocked, which name what
+    blocked it."""
     data = capture.read_bytes()
     jit: dict[int, str] = {}
     windows = [(p.start * 1000, p.end * 1000, p.name) for p in phases]
@@ -436,16 +438,16 @@ def profile_by_phase(capture: Path, phases: list[Phase], top: int) -> dict[str, 
         elif kind == 2:  # SAMPLE
             phase = next((w[2] for w in windows if w[0] <= t <= w[1]), None)
             block = next((w[2] for w in blocked if w[0] <= t <= w[1]), None)
-            names_in = [name for name in (phase, block) if name]
-            if not names_in:
+            counted_in = [name for name in (phase, block) if name]
+            if not counted_in:
                 continue
             (n,) = struct.unpack_from("<H", body, 0)
-            names = [jit.get(a, hex(a)) for a in struct.unpack_from(f"<{n}Q", body, 8)]
-            for name in names_in:
+            stack = [jit.get(a, hex(a)) for a in struct.unpack_from(f"<{n}Q", body, 8)]
+            for name in counted_in:
                 samples[name] += 1
-                if names:
-                    self_counts[name][names[0]] += 1
-                for fn in set(names):
+                if stack:
+                    self_counts[name][stack[0]] += 1
+                for fn in set(stack):
                     total_counts[name][fn] += 1
     heaviest = {
         name: [(fn, self_counts[name][fn], c) for fn, c in total_counts[name].most_common(top)] for name in samples
@@ -518,8 +520,8 @@ def main(args: Args) -> None:
         print(f"{name:<10} " + " ".join(f"{c:>15}" for c in cells))
 
     if profile:
-        phases = ["enable", "cold", "warm", "scroll", "reopen", "copied", "search", "end", "home", "coldscroll"]
-        for name in [n for phase in phases for n in (phase, f"{phase} blocked")]:
+        names = ["enable", "cold", "warm", "scroll", "reopen", "copied", "search", "end", "home", "coldscroll"]
+        for name in [n for phase in names for n in (phase, f"{phase} blocked")]:
             if name not in profile:
                 continue
             n = profile["_samples"].get(name, 0)

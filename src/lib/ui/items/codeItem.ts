@@ -28,7 +28,7 @@ export class CodeItem extends ClipboardItem {
 
 		const metadata: CodeMetadata = { language: null, ...entry.metadata } as CodeMetadata;
 
-		// Complete, so the code is highlighted once
+		// Created with its code and settings, so the code is highlighted once
 		this._code = new CodeLabel(ext, {
 			style_class: 'code-item-content',
 			code: entry.content,

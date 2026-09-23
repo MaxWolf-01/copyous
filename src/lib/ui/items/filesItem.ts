@@ -13,6 +13,14 @@ import { ContentPreview } from '../components/contentPreview.js';
 import { ClipboardItem } from './clipboardItem.js';
 import { formatFile } from './fileItem.js';
 
+/** The local files in the content of a Files entry, one URI per line */
+export function parseFiles(content: string): Gio.File[] {
+	return content
+		.split('\n')
+		.map((uri) => Gio.File.new_for_uri(uri))
+		.filter((file) => file.get_path() !== null);
+}
+
 export function commonDirectory(files: Gio.File[]): Gio.File {
 	return files
 		.map((f) => f.get_parent())
@@ -137,10 +145,7 @@ export class FilesItem extends ClipboardItem {
 
 		this.add_style_class_name('files-item');
 
-		const files: Gio.File[] = entry.content
-			.split('\n')
-			.map((f: string) => Gio.File.new_for_uri(f))
-			.filter((f) => f.get_path() !== null);
+		const files = parseFiles(entry.content);
 		const common = commonDirectory(files);
 
 		const filePath = new St.Label({

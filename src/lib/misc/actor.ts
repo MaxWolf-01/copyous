@@ -1,21 +1,6 @@
 import Clutter from 'gi://Clutter';
 
 /**
- * Retrieves the number of visible children of `actor`.
- * @param actor The actor to get the number of visible children of.
- * @returns the number of visible children.
- */
-export function get_n_visible_children(actor: Clutter.Actor): number {
-	let n = 0;
-	for (const child of actor.get_children()) {
-		if (child.visible) {
-			n++;
-		}
-	}
-	return n;
-}
-
-/**
  * Retrieves the first visible sibling of `actor` that comes after it in the list of children of `actor`'s parent.
  * @param actor The actor to get the next visible sibling of.
  * @returns the first visible sibling or null.

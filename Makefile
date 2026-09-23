@@ -60,14 +60,15 @@ endif
 
 # Lint
 lint:
-	pnpm exec eslint src --ext .ts
-	pnpm exec prettier src resources/css --check
+	pnpm exec eslint src tests --ext .ts
+	pnpm exec prettier src tests resources/css --check
 
 lint-fix:
-	pnpm exec eslint src --ext .ts --fix
-	pnpm exec prettier src resources/css --write
+	pnpm exec eslint src tests --ext .ts --fix
+	pnpm exec prettier src tests resources/css --write
 
 test:
+	pnpm exec tsc -p tests
 	pnpm exec tsx --test tests/*.test.ts tests/properties/*.test.ts
 
 shexli: $(DIST_ZIP)

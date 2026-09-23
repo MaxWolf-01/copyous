@@ -26,7 +26,7 @@ import { ClipboardItemMenu } from './components/clipboardItemMenu.js';
 import { holdImageDecodes } from './components/contentPreview.js';
 import { ConfirmClearHistoryDialog } from './indicator.js';
 import { ClipboardItem } from './items/clipboardItem.js';
-import { createItem } from './items/items.js';
+import { tryCreateItem } from './items/items.js';
 import { CenterBox, CollapsibleHeaderLayout, FitConstraint } from './layout.js';
 import { SearchEntry } from './searchEntry.js';
 
@@ -590,16 +590,16 @@ export class ClipboardDialog extends St.Widget {
 		this._scrollView.list.addEntry(entry);
 	}
 
-	/** Replaces the history with a loaded one */
+	/** Adds a loaded history to the entries already there, such as ones copied while it loaded */
 	public addEntries(entries: ClipboardEntry[]): void {
-		this._scrollView.list.setEntries(entries);
+		this._scrollView.list.addEntries(entries);
 	}
 
 	/** The item that shows an entry, connected to the dialog's actions */
 	private createItem(entry: ClipboardEntry): ClipboardItem | null {
 		let item;
 		try {
-			item = createItem(this.ext, entry);
+			item = tryCreateItem(this.ext, entry);
 			if (!item) {
 				this.ext.logger.error('Unknown item type', entry);
 				return null;
@@ -677,7 +677,7 @@ export class ClipboardDialog extends St.Widget {
 	}
 
 	public clearEntries() {
-		this._scrollView.list.setEntries([]);
+		this._scrollView.list.clear();
 	}
 
 	private openSettings() {
