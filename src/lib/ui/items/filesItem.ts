@@ -132,9 +132,6 @@ export class FilesPreview extends ContentPreview {
 
 @registerClass()
 export class FilesItem extends ClipboardItem {
-	private readonly _files: string[];
-	private readonly _formattedFiles?: string[];
-
 	constructor(ext: CopyousExtension, entry: ClipboardEntry) {
 		super(ext, entry, Icon.Folder, _('Files'));
 
@@ -155,14 +152,5 @@ export class FilesItem extends ClipboardItem {
 
 		const relativeFiles = files.map((f) => common.get_relative_path(f)).filter((f) => f !== null);
 		this._content.add_child(new FilesPreview(relativeFiles));
-
-		this._files = files.map((f) => f.get_path()?.toLowerCase() ?? '');
-		if (filePath.text.startsWith('~')) {
-			this._formattedFiles = files.map((f) => formatFile(f).toLowerCase());
-		}
-	}
-
-	protected override searchTexts(): string[] {
-		return [...this._files, ...(this._formattedFiles ?? [])];
 	}
 }

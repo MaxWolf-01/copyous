@@ -322,14 +322,6 @@ export class LinkItem extends ClipboardItem {
 		this.updateLinkPreview().catch(() => {});
 	}
 
-	protected override searchTexts(): string[] {
-		const metadata: LinkMetadata = { title: null, description: null, image: null, ...this.entry.metadata };
-		const searchTexts = [this.entry.content];
-		if (metadata.title) searchTexts.push(metadata.title);
-		if (metadata.description) searchTexts.push(metadata.description);
-		return searchTexts;
-	}
-
 	private async updateLinkPreview() {
 		const patterns = this.linkItemSettings.get_strv('link-preview-exclusion-patterns');
 

@@ -15,8 +15,8 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import { EasingParamsWithProperties } from '@girs/gnome-shell/extensions/global';
 
 import type CopyousExtension from '../../extension.js';
-import { ItemType } from '../common/constants.js';
 import { registerClass } from '../common/gjs.js';
+import type { SearchQuery } from '../common/historyList.js';
 import { Icon, loadIcon } from '../common/icons.js';
 import { OpenClipboardDialogBehavior } from '../common/settings.js';
 import { ClipboardEntry } from '../database/database.js';
@@ -25,24 +25,12 @@ import { ClipboardScrollView } from './clipboardScrollView.js';
 import { ClipboardItemMenu } from './components/clipboardItemMenu.js';
 import { holdImageDecodes } from './components/contentPreview.js';
 import { ConfirmClearHistoryDialog } from './indicator.js';
-import { CharacterItem } from './items/characterItem.js';
 import { ClipboardItem } from './items/clipboardItem.js';
-import { CodeItem } from './items/codeItem.js';
-import { ColorItem } from './items/colorItem.js';
-import { FileItem } from './items/fileItem.js';
-import { FilesItem } from './items/filesItem.js';
-import { ImageItem } from './items/imageItem.js';
-import { LinkItem } from './items/linkItem.js';
-import { TextItem } from './items/textItem.js';
+import { createItem } from './items/items.js';
 import { CenterBox, CollapsibleHeaderLayout, FitConstraint } from './layout.js';
-import { SearchEntry, SearchQuery } from './searchEntry.js';
+import { SearchEntry } from './searchEntry.js';
 
 const ANIMATION_TIME = 150;
-
-// A loaded history is built this many items at once, the rest in idle time, this many ms of it at a time. Building
-// an item costs a few ms; enable(), which every screen unlock calls, blocked the shell for the whole history at once.
-const FIRST_ENTRIES = 10;
-const ENTRY_BUDGET_MS = 8;
 
 @registerClass()
 class IncognitoButton extends St.Button {
@@ -269,8 +257,6 @@ export class ClipboardDialog extends St.Widget {
 	private _cursor: [number, number] | null = null;
 
 	private _orientation: Clutter.Orientation = Clutter.Orientation.HORIZONTAL;
-	private _pendingEntries: ClipboardEntry[] = [];
-	private _pendingId: number = 0;
 	private _perf: number[] | undefined;
 	private _perfPaintId: number = -1;
 
@@ -324,8 +310,8 @@ export class ClipboardDialog extends St.Widget {
 
 		this._header.connect('open-settings', this.openSettings.bind(this));
 		this._header.connect('clear-history', this.confirmClearHistory.bind(this));
-		this._header.searchEntry.connect('search', (_, query: SearchQuery) => this._scrollView.search(query));
-		this._header.searchEntry.connect('activate', () => this._scrollView.activateFirst());
+		this._header.searchEntry.connect('search', (_, query: SearchQuery) => this._scrollView.list.search(query));
+		this._header.searchEntry.connect('activate', () => this._scrollView.list.activateFirst());
 
 		this._header.connect('notify::header-visible', () => {
 			if (this._header.headerVisible) {
@@ -336,7 +322,7 @@ export class ClipboardDialog extends St.Widget {
 		});
 
 		// Scrollbox
-		this._scrollView = new ClipboardScrollView(ext);
+		this._scrollView = new ClipboardScrollView(ext, (entry) => this.createItem(entry));
 		this._dialog.add_child(this._scrollView);
 
 		this._widthConstraint = new Clutter.BindConstraint({
@@ -406,7 +392,7 @@ export class ClipboardDialog extends St.Widget {
 		this.updateMargins();
 
 		// Update initial search for when exclude-pinned or exclude-tagged is enabled
-		this._scrollView.search(this._header.searchEntry.searchQuery);
+		this._scrollView.list.search(this._header.searchEntry.searchQuery);
 	}
 
 	override destroy() {
@@ -419,7 +405,6 @@ export class ClipboardDialog extends St.Widget {
 			this._perfPaintId = -1;
 		}
 
-		this.dropPendingEntries();
 		super.destroy();
 	}
 
@@ -446,6 +431,10 @@ export class ClipboardDialog extends St.Widget {
 		this._nextCursor = this._cursor;
 
 		this._perf = [openStart];
+
+		// Usually built already, in idle time since the last change
+		this._scrollView.list.prepare();
+		this._perf?.push(GLib.get_monotonic_time()); // ends: prepare
 
 		const grab = Main.pushModal(this, { actionMode: Shell.ActionMode.SYSTEM_MODAL }) as Clutter.Grab;
 		// GNOME 50 (Mutter 18) removed get_seat_state()/GrabState in favor of is_revoked()
@@ -517,7 +506,7 @@ export class ClipboardDialog extends St.Widget {
 			this._perf = undefined;
 			if (!perf) return;
 			perf.push(GLib.get_monotonic_time());
-			const labels = ['grab', 'emit', 'map', 'fit', 'focus', 'show-rest', 'setup-rest', 'paint'];
+			const labels = ['prepare', 'grab', 'emit', 'map', 'fit', 'focus', 'show-rest', 'setup-rest', 'paint'];
 			const segments = perf
 				.slice(1)
 				.map((t, i) => `${labels[i] ?? i} ${((t - perf[i]!) / 1000).toFixed(1)}`)
@@ -537,7 +526,7 @@ export class ClipboardDialog extends St.Widget {
 			mode,
 			// The rest of the list is built after the fade-in, so its frames stay light
 			onComplete: () => {
-				if (this.opened) this._scrollView.revealProgressively();
+				if (this.opened) this._scrollView.list.revealProgressively();
 			},
 		});
 	}
@@ -591,95 +580,26 @@ export class ClipboardDialog extends St.Widget {
 				this.hide();
 				// Shrink the window back while hidden so the next open maps
 				// and lays out only the initial chunk
-				this._scrollView.resetWindow();
-				this._scrollView.prewarm();
+				this._scrollView.list.reset();
 				global.compositor.enable_unredirect();
 			},
 		});
 	}
 
 	public addEntry(entry: ClipboardEntry): void {
-		// A new copy of content still waiting to be built comes in as that entry
-		this.dropPendingEntry(entry);
-
-		const item = this.createItem(entry);
-		if (!item) return;
-
-		this._scrollView.addItems([item]);
-		if (!this.opened) this._scrollView.prewarm();
+		this._scrollView.list.addEntry(entry);
 	}
 
-	/** Adds a loaded history: the newest entries right away, the rest in idle time */
+	/** Replaces the history with a loaded one */
 	public addEntries(entries: ClipboardEntry[]): void {
-		this.dropPendingEntries();
-
-		const newestFirst = [...entries].sort((a, b) => b.datetime.compare(a.datetime));
-		const first = newestFirst.splice(0, FIRST_ENTRIES);
-		this._scrollView.addItems(first.map((entry) => this.createItem(entry)).filter((item) => item !== null));
-
-		this._pendingEntries = newestFirst;
-		for (const entry of newestFirst) {
-			entry.connectObject('delete', () => this.dropPendingEntry(entry), this);
-		}
-
-		this._pendingId = GLib.idle_add(GLib.PRIORITY_LOW, () => {
-			const start = GLib.get_monotonic_time();
-			const items: ClipboardItem[] = [];
-			while (this._pendingEntries.length > 0 && GLib.get_monotonic_time() - start < ENTRY_BUDGET_MS * 1000) {
-				const entry = this._pendingEntries.shift()!;
-				entry.disconnectObject(this);
-				const item = this.createItem(entry);
-				if (item) items.push(item);
-			}
-			this._scrollView.addItems(items);
-
-			if (this._pendingEntries.length > 0) return GLib.SOURCE_CONTINUE;
-			this._pendingId = 0;
-			if (!this.opened) this._scrollView.prewarm();
-			return GLib.SOURCE_REMOVE;
-		});
+		this._scrollView.list.setEntries(entries);
 	}
 
-	private dropPendingEntry(entry: ClipboardEntry) {
-		const i = this._pendingEntries.indexOf(entry);
-		if (i < 0) return;
-		this._pendingEntries.splice(i, 1);
-		entry.disconnectObject(this);
-	}
-
-	private dropPendingEntries() {
-		if (this._pendingId) GLib.source_remove(this._pendingId);
-		this._pendingId = 0;
-		for (const entry of this._pendingEntries) entry.disconnectObject(this);
-		this._pendingEntries = [];
-	}
-
+	/** The item that shows an entry, connected to the dialog's actions */
 	private createItem(entry: ClipboardEntry): ClipboardItem | null {
 		let item;
 		try {
-			item = (() => {
-				switch (entry.type) {
-					case ItemType.Text:
-						return new TextItem(this.ext, entry);
-					case ItemType.Code:
-						return new CodeItem(this.ext, entry);
-					case ItemType.Image:
-						return new ImageItem(this.ext, entry);
-					case ItemType.File:
-						return new FileItem(this.ext, entry);
-					case ItemType.Files:
-						return new FilesItem(this.ext, entry);
-					case ItemType.Link:
-						return new LinkItem(this.ext, entry);
-					case ItemType.Character:
-						return new CharacterItem(this.ext, entry);
-					case ItemType.Color:
-						return new ColorItem(this.ext, entry);
-					default:
-						return null;
-				}
-			})();
-
+			item = createItem(this.ext, entry);
 			if (!item) {
 				this.ext.logger.error('Unknown item type', entry);
 				return null;
@@ -752,13 +672,12 @@ export class ClipboardDialog extends St.Widget {
 			this.toggle();
 		} else if (behavior === OpenClipboardDialogBehavior.OpenOrSelectNext) {
 			if (!this.opened) this.open();
-			else this._scrollView.selectNextItem();
+			else this._scrollView.list.selectNextItem();
 		}
 	}
 
 	public clearEntries() {
-		this.dropPendingEntries();
-		this._scrollView.clearItems();
+		this._scrollView.list.setEntries([]);
 	}
 
 	private openSettings() {
@@ -867,7 +786,7 @@ export class ClipboardDialog extends St.Widget {
 		const isNum = key >= Clutter.KEY_0 && key <= Clutter.KEY_9;
 		if (event.has_control_modifier() && (isNum || (key >= Clutter.KEY_KP_0 && key <= Clutter.KEY_KP_9))) {
 			const i = isNum ? key - Clutter.KEY_1 : key - Clutter.KEY_KP_1;
-			if (this._scrollView.selectItem((i + 10) % 10)) {
+			if (this._scrollView.list.selectItem((i + 10) % 10)) {
 				this._header.updateHeader(false);
 			}
 

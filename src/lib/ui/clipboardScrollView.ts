@@ -4,11 +4,10 @@ import St from 'gi://St';
 
 import type CopyousExtension from '../../extension.js';
 import { enumParamSpec, registerClass } from '../common/gjs.js';
-import { get_first_visible_child, get_last_visible_child } from '../misc/actor.js';
+import { ClipboardEntry } from '../database/database.js';
 import { ClipboardScrollContainer } from './clipboardScrollContainer.js';
 import { holdImageDecodes } from './components/contentPreview.js';
 import { ClipboardItem } from './items/clipboardItem.js';
-import { SearchQuery } from './searchEntry.js';
 
 @registerClass({
 	Properties: {
@@ -25,9 +24,12 @@ export class ClipboardScrollView extends St.ScrollView {
 	private _itemWidth: number = 0;
 	private _itemHeight: number = 0;
 
-	private readonly _scrollContainer: ClipboardScrollContainer;
+	readonly list: ClipboardScrollContainer;
 
-	constructor(private ext: CopyousExtension) {
+	constructor(
+		private ext: CopyousExtension,
+		createItem: (entry: ClipboardEntry) => ClipboardItem | null,
+	) {
 		super({
 			style_class: 'clipboard-scroll-view',
 			hscrollbar_policy: St.PolicyType.AUTOMATIC,
@@ -44,22 +46,22 @@ export class ClipboardScrollView extends St.ScrollView {
 			}),
 		});
 
-		this._scrollContainer = new ClipboardScrollContainer(ext);
-		this.set_child(this._scrollContainer);
+		this.list = new ClipboardScrollContainer(ext, createItem);
+		this.set_child(this.list);
 
 		this.connect('notify::width', this.scrollbarWorkaround.bind(this));
-		this._scrollContainer.connect('notify::width', this.scrollbarWorkaround.bind(this));
+		this.list.connect('notify::width', this.scrollbarWorkaround.bind(this));
 
-		// Reveal more windowed items as scrolling approaches the end
+		// Reveal more matches as scrolling approaches either end of the window
 		this.hadjustment.connect('notify::value', () => this.onScrolled());
 		this.vadjustment.connect('notify::value', () => this.onScrolled());
 
 		// Without overflow there are no scroll events, so hidden matches would be
 		// unreachable by mouse; keep revealing until the list overflows or runs out
-		this.hadjustment.connect('notify::upper', () => this.fillViewport());
-		this.vadjustment.connect('notify::upper', () => this.fillViewport());
-		this.hadjustment.connect('notify::page-size', () => this.fillViewport());
-		this.vadjustment.connect('notify::page-size', () => this.fillViewport());
+		this.hadjustment.connect('notify::upper', () => this.list.revealProgressively(0));
+		this.vadjustment.connect('notify::upper', () => this.list.revealProgressively(0));
+		this.hadjustment.connect('notify::page-size', () => this.list.revealProgressively(0));
+		this.vadjustment.connect('notify::page-size', () => this.list.revealProgressively(0));
 
 		// Connect properties
 		this.ext.settings.connectObject(
@@ -75,7 +77,7 @@ export class ClipboardScrollView extends St.ScrollView {
 		this.updateSize();
 		this.updateScrollbar();
 
-		this.bind_property('orientation', this._scrollContainer, 'orientation', GObject.BindingFlags.SYNC_CREATE);
+		this.bind_property('orientation', this.list, 'orientation', GObject.BindingFlags.SYNC_CREATE);
 	}
 
 	get orientation(): Clutter.Orientation {
@@ -90,57 +92,12 @@ export class ClipboardScrollView extends St.ScrollView {
 		this.updateScrollbar();
 	}
 
-	public addItems(items: ClipboardItem[]) {
-		this._scrollContainer.addItems(items);
-	}
-
-	public clearItems() {
-		this._scrollContainer.clearItems();
-	}
-
-	public selectItem(index: number): boolean {
-		return this._scrollContainer.selectItem(index);
-	}
-
-	public selectNextItem() {
-		this._scrollContainer.selectNextItem();
-	}
-
-	public search(query: SearchQuery) {
-		this._scrollContainer.search(query);
-	}
-
-	public activateFirst() {
-		this._scrollContainer.activateFirst();
-	}
-
-	public resetWindow() {
-		this._scrollContainer.resetWindow();
-	}
-
-	public revealProgressively() {
-		this._scrollContainer.revealProgressively();
-	}
-
-	public prewarm() {
-		this._scrollContainer.prewarm();
-	}
-
-	private fillViewport() {
-		if (!this._scrollContainer.mapped) return;
-
-		const adjustment = this.orientation === Clutter.Orientation.HORIZONTAL ? this.hadjustment : this.vadjustment;
-		if (adjustment.upper <= adjustment.page_size) {
-			this._scrollContainer.revealMore();
-		}
-	}
-
 	private onScrolled() {
 		// Adjustment resets while mapping are not user scrolling
-		if (!this._scrollContainer.mapped) return;
+		if (!this.list.mapped) return;
 
 		holdImageDecodes();
-		this._scrollContainer.revealProgressively();
+		this.list.revealProgressively();
 	}
 
 	private updateSize() {
@@ -167,7 +124,7 @@ export class ClipboardScrollView extends St.ScrollView {
 		// Workaround for horizontal scrollbar not auto hiding
 		const show = this.ext.settings.get_boolean('show-scrollbar');
 		if (show && this.orientation === Clutter.Orientation.HORIZONTAL) {
-			if (this.allocation.get_width() > this._scrollContainer.allocation.get_width()) {
+			if (this.allocation.get_width() > this.list.allocation.get_width()) {
 				this.hscrollbarPolicy = St.PolicyType.EXTERNAL;
 			} else {
 				this.hscrollbarPolicy = St.PolicyType.AUTOMATIC;
@@ -178,22 +135,13 @@ export class ClipboardScrollView extends St.ScrollView {
 	override vfunc_key_press_event(event: Clutter.Event): boolean {
 		const key = event.get_key_symbol();
 
-		// Home
 		if (key === Clutter.KEY_Home) {
-			const child = get_first_visible_child(this._scrollContainer);
-			if (child) {
-				this._scrollContainer.focusChild(child);
-			}
+			this.list.home();
 			return Clutter.EVENT_STOP;
 		}
 
-		// End
 		if (key === Clutter.KEY_End) {
-			this._scrollContainer.revealAll();
-			const child = get_last_visible_child(this._scrollContainer);
-			if (child) {
-				this._scrollContainer.focusChild(child);
-			}
+			this.list.end();
 			return Clutter.EVENT_STOP;
 		}
 
@@ -219,7 +167,7 @@ export class ClipboardScrollView extends St.ScrollView {
 
 		if (delta === 0) return Clutter.EVENT_STOP;
 
-		const spacing = (this._scrollContainer.get_layout_manager() as Clutter.BoxLayout).spacing;
+		const spacing = (this.list.get_layout_manager() as Clutter.BoxLayout).spacing;
 
 		let adjustment: St.Adjustment;
 		let step: number;
