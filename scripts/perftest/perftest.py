@@ -132,6 +132,8 @@ class Args:
     scroll_interval_ms: int = 8
     query: str = "value"
     """Typed into the search, one character at a time."""
+    rtl: bool = False
+    """Lay out right to left, as an Arabic or Hebrew locale does."""
     profile: bool = False
     """Sample the shell's JavaScript and list the heaviest functions per phase."""
     top: int = 25
@@ -381,6 +383,8 @@ def run(args: Args, run_dir: Path) -> tuple[list[Phase], Path | None]:
         shutil.copy2(args.hljs, data / "highlight.min.js")
     if args.profile:
         shell.env["GJS_ENABLE_PROFILER"] = "1"
+    if args.rtl:
+        shell.env["CLUTTER_TEXT_DIRECTION"] = "rtl"
 
     # Processes the private bus activates inherit the working directory; keep their files in the run
     os.chdir(run_dir)

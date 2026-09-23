@@ -110,14 +110,20 @@ globalThis.perf = {
 		return now();
 	},
 
+	/** Items built and shown, the list's scroll position along its orientation, and which shown item has key focus */
 	listState() {
 		const c = list();
-		const a = c.vadjustment;
+		const a = c.orientation === Clutter.Orientation.HORIZONTAL ? c.hadjustment : c.vadjustment;
+		const shown = c.get_children().filter((x) => x.visible);
+		const focus = global.stage.get_key_focus();
 		return {
 			children: c.get_n_children(),
-			visible: c.get_children().filter((x) => x.visible).length,
+			visible: shown.length,
 			value: Math.round(a.value),
 			upper: Math.round(a.upper),
+			page: Math.round(a.page_size),
+			focused: shown.indexOf(focus),
+			rtl: c.get_text_direction() === Clutter.TextDirection.RTL,
 		};
 	},
 
