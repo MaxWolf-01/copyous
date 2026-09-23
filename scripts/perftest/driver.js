@@ -33,6 +33,31 @@ globalThis.perf = {
 		return this.frames;
 	},
 
+	/** Records every block of the main thread longer than a frame: a 1 ms timer that should tick on time */
+	watchStalls() {
+		this.stopStalls();
+		this._blocks = [];
+		let last = now();
+		this._stallId = GLib.timeout_add(GLib.PRIORITY_HIGH, 1, () => {
+			const t = now();
+			if (t - last > 17000) this._blocks.push((t - last) / 1000);
+			last = t;
+			return GLib.SOURCE_CONTINUE;
+		});
+		return now();
+	},
+
+	stopStalls() {
+		if (this._stallId) GLib.source_remove(this._stallId);
+		this._stallId = 0;
+	},
+
+	stalls() {
+		this.stopStalls();
+		const blocks = this._blocks ?? [];
+		return { blocked: blocks.reduce((a, b) => a + b, 0), longest: Math.max(0, ...blocks), end: now() };
+	},
+
 	move(x, y) {
 		pointer.notify_absolute_motion(now(), x, y);
 		return now();

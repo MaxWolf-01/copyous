@@ -8,7 +8,9 @@
 Starts the same private shell as memtest.py (own D-Bus session bus, own home, virtual monitor), seeds its
 history, and repeats a cycle of what a user does, driven through a virtual pointer:
 
-- cold: the extension is disabled and enabled again, which is what a screen unlock does, and the dialog is opened
+- enable: the extension is disabled and enabled again, which is what a screen unlock does; reports how long the
+  main thread was blocked until the history is loaded and settled
+- cold: the dialog is opened right after
 - warm: opened again right after
 - scroll: a touchpad swipe through the whole history
 - reopen: opened again after the scroll, when the list has been shrunk back
@@ -35,6 +37,7 @@ Examples:
 
 from __future__ import annotations
 
+import calendar
 import collections
 import itertools
 import json
@@ -74,7 +77,7 @@ color-scheme='prefer-dark'
 [org/gnome/shell/extensions/copyous]
 clipboard-history='keep-all'
 database-backend='sqlite'
-history-length=100
+history-length={{history_length}}
 {{extra}}
 """
 
@@ -105,6 +108,9 @@ class Args:
     history: Path | None = None
     """A Copyous data directory (clipboard.db, images/) to copy the history from. Image paths are rewritten to the
     copies, so the run never touches the original. Default: a generated history of 100 entries."""
+    entries: int | None = None
+    """Grow the history with generated entries, older than the existing ones, to this many; history-length is set
+    to match. Default: the history as it is, with history-length 100."""
     hljs: Path | None = Path.home() / ".local/share" / UUID / "highlight.min.js"
     """highlight.js build to install, so code entries are highlighted as in a real session."""
     settings: str = DEFAULT_SETTINGS
@@ -158,12 +164,17 @@ def copy_history(source: Path, data: Path) -> None:
         sys.exit("perftest: entries still point into the source directory; refusing to run")
 
 
-def generate_history(data: Path, rng: random.Random) -> None:
-    """A mix like a real history: mostly short text and code, a few long texts, screenshots, links."""
+def generate_history(data: Path, count: int, rng: random.Random) -> None:
+    """Adds `count` entries older than those already there, mixed like a real history: mostly short text and code,
+    a few long texts, screenshots, links."""
     images = data / "images"
-    images.mkdir(parents=True)
+    images.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(data / "clipboard.db")
-    db.executescript(SCHEMA)
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE name = 'clipboard'").fetchone():
+        db.executescript(SCHEMA)
+    oldest = db.execute("SELECT min(datetime) FROM clipboard").fetchone()[0]
+    # Stored in UTC
+    start = calendar.timegm(time.strptime(oldest, "%Y-%m-%d %H:%M:%S")) if oldest else time.time()
 
     def prose(n: int) -> str:
         return " ".join(rng.choice(WORDS) for _ in range(n))
@@ -173,22 +184,22 @@ def generate_history(data: Path, rng: random.Random) -> None:
         return "def function():\n" + "\n".join(body) + "\n    return value_0\n"
 
     rows = []
-    for i in range(100):
+    for i in range(count):
         kind = rng.random()
         if kind < 0.40:
             n = rng.choice([5, 20, 80, 300, 1500]) if i != 50 else 20000
-            rows.append(("Text", prose(n), None))
+            rows.append(("Text", f"{i} {prose(n)}", None))
         elif kind < 0.72:
-            rows.append(("Code", code(rng.choice([3, 10, 40, 120])), None))
+            rows.append(("Code", f"# {i}\n{code(rng.choice([3, 10, 40, 120]))}", None))
         elif kind < 0.90:
-            path = images / f"{i}.png"
+            path = images / f"generated-{i}.png"
             memtest.make_screenshot(path, (1920, 1200), seed=i)
             rows.append(("Image", f"file://{path}", None))
         else:
             meta = json.dumps({"title": prose(6), "description": prose(30), "image": None})
             rows.append(("Link", f"https://example.com/{i}/{prose(3).replace(' ', '-')}", meta))
     for i, (kind, content, meta) in enumerate(rows):
-        stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(time.time() - (len(rows) - i) * 600))
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(start - (i + 1) * 600))
         db.execute(
             "INSERT OR IGNORE INTO clipboard (type, content, pinned, tag, datetime, metadata) VALUES (?, ?, 0, NULL, ?, ?)",
             (kind, content, stamp, meta),
@@ -277,9 +288,17 @@ class Run:
         self.phases.append(phase)
         time.sleep(0.5)
 
-    def cycle(self, n: int) -> None:
+    def measure_enable(self, cycle: int) -> None:
+        """What a screen unlock costs: the main thread's blocks from enable() until the history is shown and settled"""
+        phase = Phase(cycle, "enable", self.js("perf.watchStalls()"))
         self.js("perf.reenable()")
         self.wait_ready()
+        phase.metrics = self.js("perf.stalls()")
+        phase.end = phase.metrics.pop("end")
+        self.phases.append(phase)
+
+    def cycle(self, n: int) -> None:
+        self.measure_enable(n)
         self.measure_open(n, "cold")
         self.measure_open(n, "warm")
         self.measure_scroll(n)
@@ -294,12 +313,18 @@ class Run:
 
 def run(args: Args, run_dir: Path) -> tuple[list[Phase], Path | None]:
     shell = memtest.Shell(run_dir, args.zip, "cover")
-    (shell.home / ".config/glib-2.0/settings/keyfile").write_text(SETTINGS.format(extra=args.settings))
+    keyfile = SETTINGS.format(history_length=max(args.entries or 100, 100), extra=args.settings)
+    (shell.home / ".config/glib-2.0/settings/keyfile").write_text(keyfile)
     data = shell.home / ".local/share" / UUID
     if args.history:
         copy_history(args.history.expanduser(), data)
     else:
-        generate_history(data, random.Random(1))
+        generate_history(data, 100, random.Random(1))
+    db = sqlite3.connect(data / "clipboard.db")
+    have = db.execute("SELECT count(*) FROM clipboard").fetchone()[0]
+    db.close()
+    if args.entries and args.entries > have:
+        generate_history(data, args.entries - have, random.Random(2))
     if args.hljs and args.hljs.exists():
         shutil.copy2(args.hljs, data / "highlight.min.js")
     if args.profile:
@@ -416,6 +441,12 @@ def main(args: Args) -> None:
         cells = [f"{s[k]['median']:6.1f} ({s[k]['max']:6.1f})" if k in s else f"{'-':>15}" for k in
                  ("block", "first", "visible", "jank")]  # fmt: skip
         print(f"{name:<8} " + " ".join(f"{c:>15}" for c in cells))
+    s = summary.get("enable", {})
+    if s:
+        print(
+            f"\nenable (unlock): main thread blocked {s['blocked']['median']:.0f} ms in total "
+            f"(max {s['blocked']['max']:.0f}), longest block {s['longest']['median']:.0f} ms (max {s['longest']['max']:.0f})"
+        )
     print(f"\n{'':<10} {'max frame':>15} {'max gap':>15} {'missed':>15} {'p50 gap':>15}")
     for name in ("scroll", "coldscroll"):
         s = summary.get(name, {})
