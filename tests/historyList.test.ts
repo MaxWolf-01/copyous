@@ -204,3 +204,14 @@ test('around reaches from before the window to after it', () => {
 	assert.deepEqual(names(history.around(-2, 0)), ['e7', 'e6', 'e5', 'e4', 'e3', 'e2', 'e1']);
 	assert.deepEqual(names(history.around(1, -2)), ['e4', 'e3']);
 });
+
+test('a new window size applies from the next move to either end', () => {
+	const history = list(entries(9));
+	history.windowSize = 5;
+	assert.deepEqual(names(history.shown), ['e9', 'e8', 'e7']);
+	history.toStart();
+	assert.deepEqual(names(history.shown), ['e9', 'e8', 'e7', 'e6', 'e5']);
+	history.windowSize = 2;
+	history.toEnd();
+	assert.deepEqual(names(history.shown), ['e2', 'e1']);
+});

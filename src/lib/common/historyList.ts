@@ -90,11 +90,11 @@ export class HistoryList<E extends ListEntry> {
 
 	/**
 	 * @param texts The texts of an entry a search query is matched against, besides its title
-	 * @param windowSize How many matches the window shows from its start or its end
+	 * @param windowSize How many matches the window shows from its start or its end, and at least after a change
 	 */
 	constructor(
 		private readonly texts: (entry: E) => readonly string[],
-		private readonly windowSize: number,
+		public windowSize: number,
 	) {}
 
 	/** The entries in the window, newest first */

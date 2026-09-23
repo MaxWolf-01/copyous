@@ -17,11 +17,6 @@ import { ClipboardItem } from './items/clipboardItem.js';
 import { searchTexts } from './items/items.js';
 import { State, StatusItem } from './items/statusItem.js';
 
-// The window shows this many matches from the start or the end of the list, enough to fill the dialog. Only the
-// window's entries have their items shown. An item costs about a millisecond to build and holds its widgets and
-// textures, so the length of the history must not decide how many exist (#150).
-const WINDOW = 10;
-
 // Matches revealed per frame once the dialog is open, while fewer than REVEAL_AHEAD pages of them lie beyond the
 // visible part. An item shown for the first time costs a few ms of style, layout and paint; revealing twenty in one
 // frame froze scrolling for over 100 ms.
@@ -42,7 +37,7 @@ const EVICT_STEP = 4;
  */
 @registerClass()
 export class ClipboardScrollContainer extends St.BoxLayout {
-	private readonly _history = new HistoryList<ClipboardEntry>(searchTexts, WINDOW);
+	private readonly _history = new HistoryList<ClipboardEntry>(searchTexts, 0);
 	private readonly _entries = new Set<ClipboardEntry>();
 	/** Least recently shown first */
 	private readonly _items = new Map<ClipboardEntry, ClipboardItem>();
@@ -61,7 +56,7 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 	private _buildId = 0;
 
 	constructor(
-		ext: CopyousExtension,
+		private readonly ext: CopyousExtension,
 		private readonly createItem: (entry: ClipboardEntry) => ClipboardItem | null,
 	) {
 		super({
@@ -71,6 +66,15 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 		});
 
 		this._statusItem = new StatusItem(ext);
+
+		// prettier-ignore
+		ext.settings.connectObject(
+			'changed::clipboard-size', this.updateWindowSize.bind(this),
+			'changed::clipboard-orientation', this.updateWindowSize.bind(this),
+			'changed::item-width', this.updateWindowSize.bind(this),
+			'changed::item-height', this.updateWindowSize.bind(this),
+			this);
+		this.updateWindowSize();
 		this.reconcile(0);
 
 		// The entries' signals are disconnected with the list, which owns them
@@ -236,6 +240,18 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 		} else {
 			adjustment.value = value;
 		}
+	}
+
+	/**
+	 * The window holds as many matches as fill the dialog, one more for the part of an item at its edge. Only the
+	 * window's entries have their items shown, and every item shown for the first time costs a few ms of style and
+	 * layout, so the window is no larger. Items smaller than their largest are revealed until the view is full.
+	 */
+	private updateWindowSize(): void {
+		const settings = this.ext.settings;
+		const horizontal = settings.get_enum('clipboard-orientation') === Clutter.Orientation.HORIZONTAL;
+		const item = settings.get_int(horizontal ? 'item-width' : 'item-height');
+		this._history.windowSize = Math.ceil(settings.get_int('clipboard-size') / Math.max(item, 1)) + 1;
 	}
 
 	private get horizontal(): boolean {
