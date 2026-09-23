@@ -1,7 +1,6 @@
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
-import GdkPixbuf from 'gi://GdkPixbuf';
 import Gio from 'gi://Gio';
 import Gst from 'gi://Gst';
 import St from 'gi://St';
@@ -12,6 +11,7 @@ import type CopyousExtension from '../../../extension.js';
 import { enumParamSpec, registerClass } from '../../common/gjs.js';
 import { Icon, loadIcon } from '../../common/icons.js';
 import { TextCountMode } from '../../common/settings.js';
+import { getImageSize } from '../../misc/image.js';
 import { FileType } from './contentPreview.js';
 
 const GraphemeSegmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
@@ -272,9 +272,13 @@ export async function tryCreateDirectoryFileInfo(ext: Extension, file: Gio.File)
 	}
 }
 
-export function tryCreateImageInfo(file: Gio.File, size: number): ImageInfo | null {
+export async function tryCreateImageInfo(
+	file: Gio.File,
+	size: number,
+	cancellable: Gio.Cancellable,
+): Promise<ImageInfo | null> {
 	try {
-		const [, width, height] = GdkPixbuf.Pixbuf.get_file_info(file.get_path()!);
+		const [width, height] = await getImageSize(file, cancellable);
 		return new ImageInfo(size, width, height);
 	} catch {
 		return null;
@@ -358,7 +362,7 @@ export async function createFileInfo(
 				fileInfo = await tryCreateDirectoryFileInfo(ext, file);
 				break;
 			case FileType.Image:
-				fileInfo = tryCreateImageInfo(file, size);
+				fileInfo = await tryCreateImageInfo(file, size, cancellable);
 				break;
 			case FileType.Audio:
 			case FileType.Video:
