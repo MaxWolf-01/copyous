@@ -120,8 +120,7 @@ export class ClipboardScrollView extends St.ScrollView {
 	private fillViewport() {
 		if (!this._scrollContainer.mapped) return;
 
-		const adjustment =
-			this.orientation === Clutter.Orientation.HORIZONTAL ? this.hadjustment : this.vadjustment;
+		const adjustment = this.orientation === Clutter.Orientation.HORIZONTAL ? this.hadjustment : this.vadjustment;
 		if (adjustment.upper <= adjustment.page_size) {
 			this._scrollContainer.revealMore();
 		}
@@ -133,8 +132,7 @@ export class ClipboardScrollView extends St.ScrollView {
 
 		// In RTL horizontal lists the end of the list is at the lower bound
 		const rtl =
-			this.text_direction === Clutter.TextDirection.RTL &&
-			this.orientation === Clutter.Orientation.HORIZONTAL;
+			this.text_direction === Clutter.TextDirection.RTL && this.orientation === Clutter.Orientation.HORIZONTAL;
 		const nearEnd = rtl
 			? adjustment.value <= adjustment.lower + adjustment.page_size * 2
 			: adjustment.value + adjustment.page_size * 2 >= adjustment.upper;

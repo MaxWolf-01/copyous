@@ -511,7 +511,9 @@ export class ClipboardDialog extends St.Widget {
 				.slice(1)
 				.map((t, i) => `${labels[i] ?? i} ${((t - perf[i]!) / 1000).toFixed(1)}`)
 				.join(', ');
-			this.ext.logger.log(`open timing (ms): ${segments}, total ${((perf.at(-1)! - perf[0]!) / 1000).toFixed(1)}`);
+			this.ext.logger.log(
+				`open timing (ms): ${segments}, total ${((perf.at(-1)! - perf[0]!) / 1000).toFixed(1)}`,
+			);
 		});
 
 		this._dialog.ease({
