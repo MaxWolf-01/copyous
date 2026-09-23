@@ -4,6 +4,8 @@ import GObject from 'gi://GObject';
 import Pango from 'gi://Pango';
 import St from 'gi://St';
 
+import type { HLJSApi } from 'highlight.js';
+
 import type CopyousExtension from '../../../extension.js';
 import { registerClass } from '../../common/gjs.js';
 import { CustomColorScheme } from '../../common/settings.js';
@@ -232,6 +234,43 @@ export function applyTheme(colorScheme: CustomColorScheme | undefined, highlight
 	});
 }
 
+// Detecting the language of a text highlights it in every language highlight.js knows and keeps the best match:
+// 130 ms for a preview's 4096 characters, a frozen shell. It runs on a sample, a few languages per idle, between frames.
+const DETECT_SAMPLE = 1024;
+const DETECT_BUDGET_MS = 4;
+
+/** The language of a text, highlight.js's plaintext if none fits, or null if cancelled */
+function detectLanguage(hljs: HLJSApi, text: string, cancelled: () => boolean): Promise<string | null> {
+	const sample = text.slice(0, DETECT_SAMPLE);
+	const languages = hljs.listLanguages().filter((language) => hljs.autoDetection(language));
+	let best = { language: 'plaintext', relevance: 0 };
+	let i = 0;
+
+	return new Promise((resolve) => {
+		GLib.idle_add(GLib.PRIORITY_LOW, () => {
+			if (cancelled()) {
+				resolve(null);
+				return GLib.SOURCE_REMOVE;
+			}
+
+			const start = GLib.get_monotonic_time();
+			while (i < languages.length && GLib.get_monotonic_time() - start < DETECT_BUDGET_MS * 1000) {
+				const language = languages[i++]!;
+				try {
+					const { relevance } = hljs.highlight(sample, { language, ignoreIllegals: false });
+					if (relevance > best.relevance) best = { language, relevance };
+				} catch {
+					// A language that fails on this text is not its language
+				}
+			}
+			if (i < languages.length) return GLib.SOURCE_CONTINUE;
+
+			resolve(best.language);
+			return GLib.SOURCE_REMOVE;
+		});
+	});
+}
+
 @registerClass({
 	Properties: {
 		'code': GObject.ParamSpec.string('code', null, null, GObject.ParamFlags.READWRITE, ''),
@@ -263,6 +302,7 @@ export class CodeLabel extends St.Label {
 	private _showLineNumbers = true;
 
 	private _highlighted: string = '';
+	private _detection = 0;
 
 	public constructor(
 		private ext: CopyousExtension,
@@ -301,6 +341,8 @@ export class CodeLabel extends St.Label {
 			this.ext.themeManager?.disconnect(this._colorSchemeChangedId);
 		}
 
+		// Cancels a detection in progress
+		this._detection++;
 		super.destroy();
 	}
 
@@ -364,27 +406,30 @@ export class CodeLabel extends St.Label {
 
 		// Trim indentation before highlighting to prevent empty lines
 		let text = normalizeIndentation(trim(truncatePreview(this._code)), this.tabWidth);
-		if (this.syntaxHighlighting && this.ext.hljs != null) {
-			const language =
-				this.language && this.ext.hljs.getLanguage(this.language.id) != null ? this.language.id : null;
-
-			const result = language ? this.ext.hljs.highlight(text, { language }) : this.ext.hljs.highlightAuto(text);
-			text = applyTheme(this.ext.themeManager?.colorScheme, result.value);
-
-			// Store language
-			if (!language && result.language) {
-				const id = result.language;
-				const name = this.ext.hljs.getLanguage(id)?.name ?? id;
-
-				this._language = { id, name: id.length < name.length - 3 ? id.charAt(0) + id.slice(1) : name };
-				this.notify('language');
-			}
+		const hljs = this.syntaxHighlighting ? this.ext.hljs : null;
+		const language = this.language && hljs?.getLanguage(this.language.id) != null ? this.language.id : null;
+		if (hljs && language) {
+			text = applyTheme(this.ext.themeManager?.colorScheme, hljs.highlight(text, { language }).value);
 		} else {
-			text = GLib.markup_escape_text(text, text.length);
+			// Plain until the language is known
+			if (hljs) this.detectLanguage(hljs, text);
+			text = GLib.markup_escape_text(text, -1);
 		}
 
 		this._highlighted = text;
 		this.updateLabel();
+	}
+
+	private detectLanguage(hljs: HLJSApi, text: string) {
+		const detection = ++this._detection;
+		detectLanguage(hljs, text, () => detection !== this._detection)
+			.then((id) => {
+				if (id === null || detection !== this._detection) return;
+
+				const name = hljs.getLanguage(id)?.name ?? id;
+				this.language = { id, name: id.length < name.length - 3 ? id.charAt(0) + id.slice(1) : name };
+			})
+			.catch((error) => this.ext.logger.error(error));
 	}
 
 	private updateLabel() {

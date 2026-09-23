@@ -28,13 +28,23 @@ export class CodeItem extends ClipboardItem {
 
 		const metadata: CodeMetadata = { language: null, ...entry.metadata } as CodeMetadata;
 
+		// Complete, so the code is highlighted once
 		this._code = new CodeLabel(ext, {
 			style_class: 'code-item-content',
+			code: entry.content,
 			language: metadata.language,
+			syntaxHighlighting: this.codeItemSettings.get_boolean('syntax-highlighting'),
+			showLineNumbers: this.codeItemSettings.get_boolean('show-line-numbers'),
+			tabWidth: this.ext.settings.get_int('tab-width'),
 			y_align: Clutter.ActorAlign.FILL,
 			y_expand: true,
 		});
 		this._content.add_child(this._code);
+
+		// Keep the language highlight.js detected, which costs far more than highlighting in a known language
+		this._code.connect('notify::language', () => {
+			this.entry.metadata = { language: this._code.language } as CodeMetadata;
+		});
 
 		this.codeItemSettings.connectObject(
 			'changed::syntax-highlighting',
@@ -51,7 +61,7 @@ export class CodeItem extends ClipboardItem {
 		this.ext.settings.connectObject('changed::tab-width', this.updateCode.bind(this), this._code);
 
 		// Update label
-		this.entry.bind_property('content', this._code, 'code', GObject.BindingFlags.SYNC_CREATE);
+		this.entry.bind_property('content', this._code, 'code', GObject.BindingFlags.DEFAULT);
 		this.entry.connectObject(
 			'notify::content',
 			this.updateCodeInfo.bind(this),
@@ -64,13 +74,7 @@ export class CodeItem extends ClipboardItem {
 			this,
 		);
 
-		this.updateCode();
 		this.updateCodeInfo();
-
-		// Update metadata
-		this._code.connect('notify::language', () => {
-			this.entry.metadata = { language: this._code.language } as CodeMetadata;
-		});
 	}
 
 	private updateCode() {
