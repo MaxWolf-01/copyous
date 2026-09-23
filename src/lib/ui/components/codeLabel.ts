@@ -1,8 +1,11 @@
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
+import Gio from 'gi://Gio';
 import Pango from 'gi://Pango';
 import St from 'gi://St';
+
+import type { HLJSApi } from 'highlight.js';
 
 import type CopyousExtension from '../../../extension.js';
 import { registerClass } from '../../common/gjs.js';
@@ -232,6 +235,68 @@ export function applyTheme(colorScheme: CustomColorScheme | undefined, highlight
 	});
 }
 
+// highlight.js detects the language of a text by highlighting it in every language it knows and keeping the best
+// match, 130 ms for a preview's 4096 characters. Detections run on a sample instead, one after another, a few
+// languages per idle and DETECT_BUDGET_MS at most, so frames go on in between.
+const DETECT_SAMPLE = 1024;
+const DETECT_BUDGET_MS = 4;
+
+interface Detection {
+	readonly hljs: HLJSApi;
+	readonly sample: string;
+	readonly languages: string[];
+	readonly cancellable: Gio.Cancellable;
+	readonly resolve: (language: string | null) => void;
+	next: number;
+	best: { language: string; relevance: number };
+}
+
+const detections: Detection[] = [];
+let detectionsId = 0;
+
+/** The language of a text, highlight.js's plaintext if none fits, or null if cancelled */
+function detectLanguage(hljs: HLJSApi, text: string, cancellable: Gio.Cancellable): Promise<string | null> {
+	return new Promise((resolve) => {
+		detections.push({
+			hljs,
+			sample: text.slice(0, DETECT_SAMPLE),
+			languages: hljs.listLanguages().filter((language) => hljs.autoDetection(language)),
+			cancellable,
+			resolve,
+			next: 0,
+			best: { language: 'plaintext', relevance: 0 },
+		});
+		detectionsId ||= GLib.idle_add(GLib.PRIORITY_LOW, detectSome);
+	});
+}
+
+function detectSome(): boolean {
+	const start = GLib.get_monotonic_time();
+	while (detections.length > 0 && GLib.get_monotonic_time() - start < DETECT_BUDGET_MS * 1000) {
+		const detection = detections[0]!;
+		if (detection.cancellable.is_cancelled() || detection.next === detection.languages.length) {
+			detections.shift();
+			detection.resolve(detection.cancellable.is_cancelled() ? null : detection.best.language);
+			continue;
+		}
+
+		const { hljs, sample, best } = detection;
+		const language = detection.languages[detection.next++]!;
+		const { relevance } = hljs.highlight(sample, { language, ignoreIllegals: false });
+		// As highlight.js does, a language wins a tie against one that extends it: C++ against Arduino
+		if (
+			relevance > best.relevance ||
+			(relevance === best.relevance && hljs.getLanguage(best.language)?.supersetOf === language)
+		) {
+			detection.best = { language, relevance };
+		}
+	}
+
+	if (detections.length > 0) return GLib.SOURCE_CONTINUE;
+	detectionsId = 0;
+	return GLib.SOURCE_REMOVE;
+}
+
 @registerClass({
 	Properties: {
 		'code': GObject.ParamSpec.string('code', null, null, GObject.ParamFlags.READWRITE, ''),
@@ -254,8 +319,6 @@ export function applyTheme(colorScheme: CustomColorScheme | undefined, highlight
 	},
 })
 export class CodeLabel extends St.Label {
-	private readonly _colorSchemeChangedId: number = -1;
-
 	private _code: string = '';
 	private _language: Language | null = null;
 	private _tabWidth = 4;
@@ -263,45 +326,45 @@ export class CodeLabel extends St.Label {
 	private _showLineNumbers = true;
 
 	private _highlighted: string = '';
+	private _detection: Gio.Cancellable | null = null;
 
 	public constructor(
 		private ext: CopyousExtension,
 		props: Partial<St.Label.ConstructorProps & CodeLabelConstructorProps>,
 	) {
-		super({ ...props, min_height: 0, clip_to_allocation: true });
+		// The label's own properties are set once, below. Passed on, each would highlight the code before `ext` is set.
+		const {
+			code = '',
+			language = null,
+			syntaxHighlighting = true,
+			showLineNumbers = true,
+			tabWidth = 4,
+			...label
+		} = props;
+		super({ ...label, min_height: 0, clip_to_allocation: true });
 		this.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
 		this.clutter_text.ellipsize = Pango.EllipsizeMode.END;
 
-		const params = {
-			...{ code: '', language: '', syntaxHighlighting: true, showLineNumbers: true, tabWidth: 4 },
-			...props,
-		} as CodeLabelConstructorProps;
-		this._code = params.code;
-		this._language = params.language;
-		this._syntaxHighlighting = params.syntaxHighlighting;
-		this._showLineNumbers = params.showLineNumbers;
-		this._tabWidth = params.tabWidth;
+		this._code = code;
+		this._language = language;
+		this._syntaxHighlighting = syntaxHighlighting;
+		this._showLineNumbers = showLineNumbers;
+		this._tabWidth = tabWidth;
 
 		// Update text when global color scheme changes
-		if (this.ext.themeManager) {
-			this._colorSchemeChangedId = this.ext.themeManager?.connect(
-				'notify::color-scheme',
-				this.updateText.bind(this),
-			);
-		}
+		const colorSchemeChangedId = this.ext.themeManager?.connect('notify::color-scheme', this.updateText.bind(this));
 
 		// Update text after hljs is loaded
-		this.ext.connectHljsInit(this.updateText.bind(this));
+		const stopWaiting = this.ext.connectHljsInit(this.updateText.bind(this));
+
+		// Destroyed as a child of an item, from C, an override of destroy() would not run
+		this.connect('destroy', () => {
+			if (colorSchemeChangedId) this.ext.themeManager?.disconnect(colorSchemeChangedId);
+			stopWaiting();
+			this._detection?.cancel();
+		});
 
 		this.updateText();
-	}
-
-	override destroy(): void {
-		if (this._colorSchemeChangedId >= 0) {
-			this.ext.themeManager?.disconnect(this._colorSchemeChangedId);
-		}
-
-		super.destroy();
 	}
 
 	get code() {
@@ -364,27 +427,35 @@ export class CodeLabel extends St.Label {
 
 		// Trim indentation before highlighting to prevent empty lines
 		let text = normalizeIndentation(trim(truncatePreview(this._code)), this.tabWidth);
-		if (this.syntaxHighlighting && this.ext.hljs != null) {
-			const language =
-				this.language && this.ext.hljs.getLanguage(this.language.id) != null ? this.language.id : null;
-
-			const result = language ? this.ext.hljs.highlight(text, { language }) : this.ext.hljs.highlightAuto(text);
-			text = applyTheme(this.ext.themeManager?.colorScheme, result.value);
-
-			// Store language
-			if (!language && result.language) {
-				const id = result.language;
-				const name = this.ext.hljs.getLanguage(id)?.name ?? id;
-
-				this._language = { id, name: id.length < name.length - 3 ? id.charAt(0) + id.slice(1) : name };
-				this.notify('language');
-			}
+		const hljs = this.syntaxHighlighting ? this.ext.hljs : null;
+		const language = this.language && hljs?.getLanguage(this.language.id) != null ? this.language.id : null;
+		if (hljs && language) {
+			text = applyTheme(this.ext.themeManager?.colorScheme, hljs.highlight(text, { language }).value);
 		} else {
-			text = GLib.markup_escape_text(text, text.length);
+			// Plain until the language is known
+			if (hljs) this.detect(hljs, text);
+			text = GLib.markup_escape_text(text, -1);
 		}
 
 		this._highlighted = text;
 		this.updateLabel();
+	}
+
+	/** Detects the language of the code, replacing a detection in progress, and highlights the code in it */
+	private detect(hljs: HLJSApi, text: string) {
+		this._detection?.cancel();
+		const detection = new Gio.Cancellable();
+		this._detection = detection;
+
+		detectLanguage(hljs, text, detection)
+			.then((id) => {
+				if (id === null) return;
+
+				this._detection = null;
+				const name = hljs.getLanguage(id)?.name ?? id;
+				this.language = { id, name: id.length < name.length - 3 ? id.charAt(0) + id.slice(1) : name };
+			})
+			.catch((error) => console.error(error));
 	}
 
 	private updateLabel() {

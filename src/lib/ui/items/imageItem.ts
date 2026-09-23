@@ -72,10 +72,6 @@ export class ImageItem extends ClipboardItem {
 		this.configureImageInfo();
 	}
 
-	protected override searchTexts(): string[] {
-		return [];
-	}
-
 	private updateSettings() {
 		this.showImageInfo = this.imageItemSettings.get_boolean('show-image-info');
 		this._imagePreview.backgroundSize = this.imageItemSettings.get_enum('background-size');

@@ -15,6 +15,8 @@ history, and repeats a cycle of what a user does, driven through a virtual point
 - scroll: a touchpad swipe through the whole history
 - reopen: opened again after the scroll, when the list has been shrunk back
 - copied: a new text is copied while the dialog is closed, then the dialog is opened
+- search: the dialog is opened and --query typed into the search, one character every 200 ms, then cleared
+- end, home: the dialog is opened and End pressed, which jumps to the oldest entry; then Home, back to the newest
 - coldscroll: re-enabled again, opened, and a touchpad swipe starts 0.3 s later
 
 Open metrics, in ms from the call to open():
@@ -26,6 +28,9 @@ Open metrics, in ms from the call to open():
 
 Scroll metrics: the longest frame (update + paint), the longest interval between frames, and how many intervals
 missed at least one 60 Hz frame (> 25 ms).
+
+Search and End/Home metrics, in ms from the keystroke: until the first frame painted after it (median and worst over
+the keystrokes), and the longest the main thread was blocked meanwhile.
 
 With --profile, the shell's JavaScript is sampled (GJS profiler) and the heaviest functions are listed per phase.
 
@@ -125,6 +130,10 @@ class Args:
     scroll_dy: float = 3.0
     """Pixels per touchpad event; the extension scrolls one item per 10 px."""
     scroll_interval_ms: int = 8
+    query: str = "value"
+    """Typed into the search, one character at a time."""
+    rtl: bool = False
+    """Lay out right to left, as an Arabic or Hebrew locale does."""
     profile: bool = False
     """Sample the shell's JavaScript and list the heaviest functions per phase."""
     top: int = 25
@@ -234,6 +243,19 @@ def open_metrics(t0: int, t1: int, frames: list) -> dict:
     return m
 
 
+def key_metrics(keys: list, frames: list, stalls: dict) -> dict:
+    """keys: [before, after] each keystroke's synchronous handling; stalls: the main thread's blocks meanwhile. A
+    keystroke no frame followed has no latency."""
+    ends = [f[1] for f in frames]
+    latencies = [(e - t0) / 1000 for t0, t1 in keys if (e := next((e for e in ends if e > t1), None))]
+    return {
+        "latency": statistics.median(latencies) if latencies else None,
+        "worst": max(latencies, default=None),
+        "longest": stalls["longest"],
+        "blocks": stalls["blocks"],
+    }
+
+
 def scroll_metrics(frames: list) -> dict:
     durations = [(f[1] - f[0]) / 1000 for f in frames]
     ends = [f[1] for f in frames]
@@ -288,6 +310,36 @@ class Run:
         self.phases.append(phase)
         time.sleep(0.5)
 
+    def measure_search(self, cycle: int) -> None:
+        self.js("perf.open(900, 300)")
+        time.sleep(self.args.window)
+        phase = Phase(cycle, "search", self.js("perf.startFrames()"))
+        self.js("perf.watchStalls()")
+        self.js(f"perf.typeSearch({json.dumps(self.args.query)}, 200)")
+        memtest.wait_for(lambda: self.js("perf.typing") is False, 60, "the search to be typed", 0.1)
+        time.sleep(0.5)
+        frames = self.js("perf.stopFrames()")
+        phase.metrics = key_metrics(self.js("perf.keys"), frames, self.js("perf.stalls()"))
+        phase.end = self.js("perf.close()")
+        self.phases.append(phase)
+        time.sleep(0.5)
+
+    def measure_jumps(self, cycle: int) -> None:
+        """End, to the oldest entry, then Home, back to the newest"""
+        self.js("perf.open(900, 300)")
+        time.sleep(self.args.window)
+        for name, key in (("end", "Clutter.KEY_End"), ("home", "Clutter.KEY_Home")):
+            phase = Phase(cycle, name, self.js("perf.startFrames()"))
+            self.js("perf.watchStalls()")
+            keys = [self.js(f"perf.key({key})")]
+            time.sleep(1.0)
+            frames = self.js("perf.stopFrames()")
+            phase.end = frames[-1][1] if frames else phase.start
+            phase.metrics = key_metrics(keys, frames, self.js("perf.stalls()")) | {"list": self.js("perf.listState()")}
+            self.phases.append(phase)
+        self.js("perf.close()")
+        time.sleep(0.5)
+
     def measure_enable(self, cycle: int) -> None:
         """What a screen unlock costs: the main thread's blocks from enable() until the history is shown and settled"""
         phase = Phase(cycle, "enable", self.js("perf.watchStalls()"))
@@ -306,6 +358,8 @@ class Run:
         self.js(f"perf.copyText('perftest {n} {time.time()}')")
         time.sleep(1.0)
         self.measure_open(n, "copied")
+        self.measure_search(n)
+        self.measure_jumps(n)
         self.js("perf.reenable()")
         self.wait_ready()
         self.measure_scroll(n, "coldscroll", delay=0.3)
@@ -329,6 +383,8 @@ def run(args: Args, run_dir: Path) -> tuple[list[Phase], Path | None]:
         shutil.copy2(args.hljs, data / "highlight.min.js")
     if args.profile:
         shell.env["GJS_ENABLE_PROFILER"] = "1"
+    if args.rtl:
+        shell.env["CLUTTER_TEXT_DIRECTION"] = "rtl"
 
     # Processes the private bus activates inherit the working directory; keep their files in the run
     os.chdir(run_dir)
@@ -355,10 +411,13 @@ def run(args: Args, run_dir: Path) -> tuple[list[Phase], Path | None]:
 
 
 def profile_by_phase(capture: Path, phases: list[Phase], top: int) -> dict[str, list[tuple[str, int, int]]]:
-    """Per phase name: (function, self samples, total samples), heaviest total first."""
+    """Per phase name: (function, self samples, total samples), heaviest total first. A phase that watched the main
+    thread's blocks also gets "<phase> blocked", from the samples taken while the thread was blocked, which name what
+    blocked it."""
     data = capture.read_bytes()
     jit: dict[int, str] = {}
     windows = [(p.start * 1000, p.end * 1000, p.name) for p in phases]
+    blocked = [(a * 1000, b * 1000, f"{p.name} blocked") for p in phases for a, b in p.metrics.get("blocks", [])]
     self_counts: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
     total_counts: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
     samples = collections.Counter()
@@ -381,16 +440,19 @@ def profile_by_phase(capture: Path, phases: list[Phase], top: int) -> dict[str, 
                 jit[addr] = body[pos + 8 : end].decode(errors="replace")
                 pos = end + 1
         elif kind == 2:  # SAMPLE
-            name = next((w[2] for w in windows if w[0] <= t <= w[1]), None)
-            if name is None:
+            phase = next((w[2] for w in windows if w[0] <= t <= w[1]), None)
+            block = next((w[2] for w in blocked if w[0] <= t <= w[1]), None)
+            counted_in = [name for name in (phase, block) if name]
+            if not counted_in:
                 continue
             (n,) = struct.unpack_from("<H", body, 0)
-            names = [jit.get(a, hex(a)) for a in struct.unpack_from(f"<{n}Q", body, 8)]
-            samples[name] += 1
-            if names:
-                self_counts[name][names[0]] += 1
-            for fn in set(names):
-                total_counts[name][fn] += 1
+            stack = [jit.get(a, hex(a)) for a in struct.unpack_from(f"<{n}Q", body, 8)]
+            for name in counted_in:
+                samples[name] += 1
+                if stack:
+                    self_counts[name][stack[0]] += 1
+                for fn in set(stack):
+                    total_counts[name][fn] += 1
     heaviest = {
         name: [(fn, self_counts[name][fn], c) for fn, c in total_counts[name].most_common(top)] for name in samples
     }
@@ -454,8 +516,16 @@ def main(args: Args) -> None:
                  ("max_frame", "max_gap", "missed", "p50_gap")]  # fmt: skip
         print(f"{name:<10} " + " ".join(f"{c:>15}" for c in cells))
 
+    print(f"\n{'keys':<10} {'latency':>15} {'worst':>15} {'longest block':>15}")
+    for name in ("search", "end", "home"):
+        s = summary.get(name, {})
+        cells = [f"{s[k]['median']:6.1f} ({s[k]['max']:6.1f})" if k in s else f"{'-':>15}" for k in
+                 ("latency", "worst", "longest")]  # fmt: skip
+        print(f"{name:<10} " + " ".join(f"{c:>15}" for c in cells))
+
     if profile:
-        for name in ["cold", "warm", "scroll", "reopen", "copied", "coldscroll"]:
+        names = ["enable", "cold", "warm", "scroll", "reopen", "copied", "search", "end", "home", "coldscroll"]
+        for name in [n for phase in names for n in (phase, f"{phase} blocked")]:
             if name not in profile:
                 continue
             n = profile["_samples"].get(name, 0)

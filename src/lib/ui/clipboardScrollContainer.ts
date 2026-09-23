@@ -5,39 +5,60 @@ import St from 'gi://St';
 
 import type CopyousExtension from '../../extension.js';
 import { registerClass } from '../common/gjs.js';
+import { HistoryList, SearchQuery } from '../common/historyList.js';
+import { ClipboardEntry } from '../database/database.js';
 import {
 	get_first_visible_child,
 	get_last_visible_child,
-	get_n_visible_children,
 	get_next_visible_sibling,
 	get_previous_visible_sibling,
 } from '../misc/actor.js';
 import { ClipboardItem } from './items/clipboardItem.js';
+import { searchTexts } from './items/items.js';
 import { State, StatusItem } from './items/statusItem.js';
-import { SearchChange, SearchQuery } from './searchEntry.js';
 
-// Number of matched items shown when the dialog opens: enough to fill it. Only
-// windowed items become actors on screen; mapping and laying out the full
-// history on every open is what froze the shell (#150).
-const WINDOW_START = 10;
-
-// Matched items revealed per frame once the dialog is open, while fewer than
-// REVEAL_AHEAD pages of them lie beyond the visible part. An item shown for the
-// first time costs a few ms of style, layout and paint; revealing twenty in one
-// frame froze scrolling for over 100 ms. Scrolling reveals further.
+// Matches revealed per frame once the dialog is open, while fewer than REVEAL_AHEAD pages of them lie beyond the
+// visible part. An item shown for the first time costs a few ms of style, layout and paint; revealing twenty in one
+// frame froze scrolling for over 100 ms.
 const REVEAL_STEP = 2;
 const REVEAL_AHEAD = 3;
 
+// Items are built in idle time for BUILD_AHEAD matches beyond either end of the window, so that revealing them only
+// shows them. Of the items that left the window, the KEEP most recently shown stay built for a return; the others
+// are destroyed, EVICT_STEP per idle.
+const BUILD_AHEAD = 20;
+const KEEP = 20;
+const EVICT_STEP = 4;
+
+/**
+ * The list of the dialog. The history, its search and its window are the HistoryList's; this builds, shows, orders
+ * and destroys the items that show the window's entries, and keeps in place what the user looks at while the list
+ * changes around it.
+ */
 @registerClass()
 export class ClipboardScrollContainer extends St.BoxLayout {
+	private readonly _history = new HistoryList<ClipboardEntry>(searchTexts, 0);
+	private readonly _entries = new Set<ClipboardEntry>();
+	/** Least recently shown first */
+	private readonly _items = new Map<ClipboardEntry, ClipboardItem>();
+	private readonly _unbuildable = new WeakSet<ClipboardEntry>();
 	private readonly _statusItem: StatusItem;
-	private _lastFocus: Clutter.Actor | null = null;
-	private _lastQuery: SearchQuery | null = null;
-	private _revealed: number = WINDOW_START;
-	private _revealLaterId: number = 0;
-	private _prewarmId: number = 0;
 
-	constructor(ext: CopyousExtension) {
+	/** The items shown, in order */
+	private _shown: ClipboardItem[] = [];
+	private _first: St.Widget | null = null;
+	private _last: St.Widget | null = null;
+	private _lastFocus: Clutter.Actor | null = null;
+	private _scrollTarget: { child: Clutter.Actor; animate: boolean } | null = null;
+	private _revealedBack = false;
+	private _revealLaterId = 0;
+	private _revealAhead = 0;
+	private _buildId = 0;
+
+	constructor(
+		private readonly ext: CopyousExtension,
+		private readonly createItem: (entry: ClipboardEntry) => ClipboardItem | null,
+	) {
 		super({
 			style_class: 'clipboard-item-list',
 			x_align: Clutter.ActorAlign.START,
@@ -45,151 +66,143 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 		});
 
 		this._statusItem = new StatusItem(ext);
-		this.updateVisible();
 
+		// prettier-ignore
+		ext.settings.connectObject(
+			'changed::clipboard-size', this.updateWindowSize.bind(this),
+			'changed::clipboard-orientation', this.updateWindowSize.bind(this),
+			'changed::item-width', this.updateWindowSize.bind(this),
+			'changed::item-height', this.updateWindowSize.bind(this),
+			this);
+		this.updateWindowSize();
+		this.reconcile(0);
+
+		// The entries' signals are disconnected with the list, which owns them
 		this.connect('destroy', () => {
 			this.stopRevealing();
-			if (this._prewarmId) GLib.source_remove(this._prewarmId);
-			this._prewarmId = 0;
+			if (this._buildId) GLib.source_remove(this._buildId);
+			this._buildId = 0;
+			if (this._statusItem.get_parent() === null) this._statusItem.destroy();
 		});
 	}
 
-	private applyWindow(): void {
-		let rank = 0;
-		for (const child of this.get_children()) {
-			if (!(child instanceof ClipboardItem)) continue;
-			child.visible = child.matched && rank < this._revealed;
-			if (child.matched) rank++;
+	/** Adds entries, a loaded history, to those already there, such as ones copied while it loaded */
+	public addEntries(entries: readonly ClipboardEntry[]): void {
+		for (const entry of entries) {
+			if (!this._entries.has(entry)) this.subscribe(entry);
+		}
+		this._history.set([...this._entries]);
+		this.reconcile(this.buildNow);
+	}
+
+	/** Adds a new entry, or one whose content was copied again */
+	public addEntry(entry: ClipboardEntry): void {
+		if (!this._entries.has(entry)) this.subscribe(entry);
+		this.change(entry, () => this._history.add(entry));
+	}
+
+	public clear(): void {
+		const focused = this.focusedItem() !== null;
+		for (const entry of this._entries) entry.disconnectObject(this);
+		this._entries.clear();
+		for (const [entry, item] of this._items) this.destroyItem(entry, item);
+
+		this._history.set([]);
+		this.reconcile(0);
+		if (focused) this.focusSearch();
+	}
+
+	public search(query: SearchQuery): void {
+		const focused = this.focusedItem();
+		this._history.search(query);
+		this.reconcile(this.buildNow);
+		this.revealProgressively();
+
+		const first = this._shown[0];
+		if (focused?.visible) {
+			this.focusChild(focused, false);
+		} else if (this._lastFocus?.visible) {
+			this.scrollToChild(this._lastFocus, false);
+		} else if (this._lastFocus instanceof ClipboardItem && this._history.matched(this._lastFocus.entry)) {
+			// Still matching, only outside the window: don't steal key focus
+		} else if (first) {
+			this.focusChild(first, false);
 		}
 	}
 
-	private setRevealed(revealed: number): void {
-		this.removePseudoclasses();
-		this._revealed = revealed;
-		this.applyWindow();
-		this.updateVisible();
+	/** Builds the missing items of the window, for the dialog to open */
+	public prepare(): void {
+		this.reconcile(Infinity);
 	}
 
-	public revealMore(): void {
-		if (!this.hasHiddenMatches()) return;
-		this.setRevealed(this._revealed + REVEAL_STEP);
-	}
-
-	public revealAll(): void {
-		if (!this.hasHiddenMatches()) return;
-		this.setRevealed(Number.MAX_SAFE_INTEGER);
-	}
-
-	/** Reveals hidden matches a few per frame, before each frame's layout, until REVEAL_AHEAD pages are ready */
-	public revealProgressively(): void {
-		if (this._revealLaterId || !this.wantsMore()) return;
-
-		this._revealLaterId = global.compositor.get_laters().add(Meta.LaterType.BEFORE_REDRAW, () => {
-			if (this.wantsMore()) {
-				this.setRevealed(this._revealed + REVEAL_STEP);
-				return GLib.SOURCE_CONTINUE;
-			}
-
-			this._revealLaterId = 0;
-			return GLib.SOURCE_REMOVE;
-		});
-	}
-
-	private wantsMore(): boolean {
-		if (!this.mapped || !this.hasHiddenMatches()) return false;
-
-		const horizontal = this.orientation === Clutter.Orientation.HORIZONTAL;
-		const adjustment = horizontal ? this.hadjustment : this.vadjustment;
-		// In RTL horizontal lists the end of the list is at the lower bound
-		const ahead =
-			horizontal && this.text_direction === Clutter.TextDirection.RTL
-				? adjustment.value - adjustment.lower
-				: adjustment.upper - adjustment.value - adjustment.page_size;
-		return ahead < REVEAL_AHEAD * adjustment.page_size;
-	}
-
-	private stopRevealing(): void {
-		if (this._revealLaterId) global.compositor.get_laters().remove(this._revealLaterId);
-		this._revealLaterId = 0;
-	}
-
-	public resetWindow(): void {
+	/** Back to the first matches, once the dialog is hidden */
+	public reset(): void {
 		this.stopRevealing();
-		this.setRevealed(WINDOW_START);
+		this._history.toStart();
+		this.reconcile(0);
+	}
+
+	public home(): void {
+		this._history.toStart();
+		this.reconcile(Infinity);
+		const first = this._shown[0];
+		if (first) this.focusChild(first);
+	}
+
+	public end(): void {
+		this._history.toEnd();
+		this.reconcile(Infinity);
+		const last = this._shown.at(-1);
+		if (last) this.focusChild(last);
 	}
 
 	/**
-	 * Computes the styles and text layouts of the items the next open shows, one item per idle, while the dialog is
-	 * hidden. Items created by enable(), which every screen unlock calls, otherwise all pay for them in the first
-	 * frame of the next open.
+	 * Reveals more matches a few per frame, before each frame's layout, until `ahead` pages of them are ready beyond
+	 * the visible part in either direction
 	 */
-	public prewarm(): void {
-		if (this._prewarmId || this.mapped) return;
+	public revealProgressively(ahead: number = REVEAL_AHEAD): void {
+		if (!this.mapped) return;
 
-		// Items keep arriving while enable() loads the history, so the list is looked up again on every step
-		let next = 0;
-		this._prewarmId = GLib.idle_add(GLib.PRIORITY_LOW, () => {
-			const items = this.get_children().filter((c) => c instanceof ClipboardItem && c.visible);
-			const item = items[next++];
-			if (item instanceof ClipboardItem && !this.mapped) {
-				item.prewarm();
-				return GLib.SOURCE_CONTINUE;
-			}
+		this._revealAhead = Math.max(this._revealAhead, ahead);
+		if (this._revealLaterId) return;
 
-			this._prewarmId = 0;
+		this._revealLaterId = global.compositor.get_laters().add(Meta.LaterType.BEFORE_REDRAW, () => {
+			if (this.reveal()) return GLib.SOURCE_CONTINUE;
+
+			this._revealLaterId = 0;
+			this._revealAhead = 0;
 			return GLib.SOURCE_REMOVE;
 		});
 	}
 
-	private hasHiddenMatches(): boolean {
-		let matched = 0;
-		for (const child of this.get_children()) {
-			if (child instanceof ClipboardItem && child.matched && ++matched > this._revealed) return true;
-		}
-		return false;
-	}
-
-	private updateVisible() {
-		const n = get_n_visible_children(this);
-		if (n === 0) {
-			this.add_child(this._statusItem);
-			this.x_align = Clutter.ActorAlign.CENTER;
-			this.x_expand = true;
-
-			if (this.get_n_children() === 1) {
-				this._statusItem.state = State.Empty;
-			} else {
-				this._statusItem.state = State.NoResults;
-			}
-		} else if (n >= 2 && this._statusItem.get_parent() !== null) {
-			this.remove_child(this._statusItem);
-			this.x_align = Clutter.ActorAlign.START;
-			this.x_expand = false;
+	/** Focuses the match at `index`, counted from the newest */
+	public selectItem(index: number): boolean {
+		if (!this._history.atStart) {
+			this._history.toStart();
+			this.reconcile(Infinity);
 		}
 
-		this.updatePseudoclasses();
+		const item = this._shown[index];
+		if (!item) return false;
+
+		this.focusChild(item);
+		return true;
 	}
 
-	private removePseudoclasses(): void {
-		(get_first_visible_child(this) as St.Widget | null)?.remove_style_pseudo_class('first-child');
-		(get_last_visible_child(this) as St.Widget | null)?.remove_style_pseudo_class('last-child');
-	}
-
-	private updatePseudoclasses(): void {
-		(get_first_visible_child(this) as St.Widget | null)?.add_style_pseudo_class('first-child');
-		(get_last_visible_child(this) as St.Widget | null)?.add_style_pseudo_class('last-child');
-	}
-
-	private nextFocus(child: Clutter.Actor, animate: boolean = true): void {
-		if (child.get_parent() !== this) return;
-
-		const newFocus = get_next_visible_sibling(child) ?? get_previous_visible_sibling(child);
-		if (newFocus && newFocus !== this._statusItem) {
-			this.focusChild(newFocus, animate);
-		} else {
-			// Navigate to the search entry
-			global.focus_manager.get_group(this).grab_key_focus();
+	public selectNextItem() {
+		const focused = this.focusedItem();
+		if (focused === null) {
+			const first = this._shown[0];
+			if (first) this.focusChild(first);
+			return;
 		}
+
+		if (focused === this._shown.at(-1) && this._history.extend(REVEAL_STEP)) this.reconcile(Infinity);
+		this.nextFocus(focused);
+	}
+
+	public activateFirst(): void {
+		this._shown[0]?.vfunc_clicked(1);
 	}
 
 	public focusChild(child: Clutter.Actor, animate: boolean = true): void {
@@ -201,32 +214,26 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 	}
 
 	public scrollToFocus(animate: boolean = true): void {
-		for (const child of this.get_children()) {
-			if (child.has_key_focus()) {
-				this._lastFocus = child;
-				this.scrollToChild(child, animate);
-				return;
-			}
-		}
+		const focused = this.focusedItem();
+		if (focused === null) return;
+
+		this._lastFocus = focused;
+		this.scrollToChild(focused, animate);
 	}
 
 	public scrollToChild(child: Clutter.Actor, animate: boolean = true): void {
 		if (child.get_parent() !== this) return;
 
-		const box = child.get_allocation_box();
-		let adjustment: St.Adjustment;
-		let value: number;
-		if (this.orientation === Clutter.Orientation.HORIZONTAL) {
-			adjustment = this.hadjustment;
-			value = box.x1 + box.get_width() * 0.5 - adjustment.page_size * 0.5;
-		} else {
-			adjustment = this.vadjustment;
-			value = box.y1 + box.get_height() * 0.5 - adjustment.page_size * 0.5;
+		// A child shown this frame has no allocation yet; it is scrolled to after the layout that gives it one
+		if (!child.has_allocation()) {
+			this._scrollTarget = { child, animate };
+			this.queue_relayout();
+			return;
 		}
 
-		if (this.text_direction === Clutter.TextDirection.RTL) {
-			value = adjustment.get_upper() - adjustment.page_size - value;
-		}
+		const adjustment = this.adjustment;
+		const [start, end] = this.span(child);
+		const value = this.valueAt(adjustment, (start + end) / 2 - adjustment.page_size / 2);
 
 		if (animate) {
 			adjustment.ease(value, { duration: 150, mode: Clutter.AnimationMode.EASE_OUT_QUAD });
@@ -235,218 +242,317 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 		}
 	}
 
-	/** Adds items at their place by date, then applies the search and the window once for all of them */
-	public addItems(items: ClipboardItem[]): void {
-		if (items.length === 0) return;
+	/**
+	 * The window holds as many matches as fill the dialog, one more for the part of an item at its edge. Only the
+	 * window's entries have their items shown, and every item shown for the first time costs a few ms of style and
+	 * layout, so the window is no larger than that. Items smaller than their largest are revealed until the view is
+	 * full. A dialog laid out top to bottom counts its header and footer as list, one item too many at most.
+	 */
+	private updateWindowSize(): void {
+		const settings = this.ext.settings;
+		const horizontal = settings.get_enum('clipboard-orientation') === Clutter.Orientation.HORIZONTAL;
+		const item = settings.get_int(horizontal ? 'item-width' : 'item-height');
+		this._history.windowSize = Math.ceil(settings.get_int('clipboard-size') / item) + 1;
 
-		this.removePseudoclasses();
-		for (const item of items) {
-			this.placeItem(item);
-			this.connectEntry(item);
-			if (this._lastQuery) item.search(this._lastQuery);
-		}
-		this.applyWindow();
-		this.updateVisible();
+		// Changed in the preferences, which the dialog closes to open: the next open shows the new window
+		if (!this.mapped) this.reset();
 	}
 
-	private connectEntry(item: ClipboardItem): void {
-		// The connections go with the item: a destroyed item must not be re-inserted or searched
-		item.entry.connectObject(
-			// Move item when datetime changes
+	private get horizontal(): boolean {
+		return this.orientation === Clutter.Orientation.HORIZONTAL;
+	}
+
+	private get adjustment(): St.Adjustment {
+		return this.horizontal ? this.hadjustment : this.vadjustment;
+	}
+
+	/** How many missing items to build now: all while the list is shown, none while it is hidden */
+	private get buildNow(): number {
+		return this.mapped ? Infinity : 0;
+	}
+
+	/**
+	 * How far the content is moved to scroll it by `value`, in the content's coordinates. A right-to-left horizontal
+	 * list starts at its right end, so the value counts from there.
+	 */
+	private translation(adjustment: St.Adjustment, value: number = adjustment.value): number {
+		const rtl = this.horizontal && this.text_direction === Clutter.TextDirection.RTL;
+		return rtl ? adjustment.upper - adjustment.page_size - value : value;
+	}
+
+	/** The value that moves the content by `translation`, the inverse of translation() */
+	private valueAt(adjustment: St.Adjustment, translation: number): number {
+		return this.translation(adjustment, translation);
+	}
+
+	/** Where a child begins and ends along the list, in the content's coordinates */
+	private span(child: Clutter.Actor): [number, number] {
+		const box = child.get_allocation_box();
+		return this.horizontal ? [box.x1, box.x2] : [box.y1, box.y2];
+	}
+
+	/**
+	 * One frame's step. Builds up to REVEAL_STEP items the window still lacks, or else reveals REVEAL_STEP more
+	 * matches at an end with fewer than `_revealAhead` pages of them ready. Returns whether there is more to do.
+	 */
+	private reveal(): boolean {
+		if (!this.mapped) return false;
+
+		if (this._history.shown.some((entry) => !this._items.has(entry) && !this._unbuildable.has(entry))) {
+			this.reconcile(REVEAL_STEP);
+			return true;
+		}
+
+		// The value counts from the start of the list, in either direction
+		const adjustment = this.adjustment;
+		const ahead = this._revealAhead * adjustment.page_size;
+		const before = adjustment.value;
+		const after = adjustment.upper - adjustment.page_size - adjustment.value;
+
+		let revealed = after <= ahead && this._history.extend(REVEAL_STEP);
+		if (before <= ahead && this._history.extendBack(REVEAL_STEP)) {
+			this._revealedBack = true;
+			revealed = true;
+		}
+
+		if (revealed) this.reconcile(REVEAL_STEP);
+		return revealed;
+	}
+
+	private stopRevealing(): void {
+		if (this._revealLaterId) global.compositor.get_laters().remove(this._revealLaterId);
+		this._revealLaterId = 0;
+		this._revealAhead = 0;
+	}
+
+	private subscribe(entry: ClipboardEntry): void {
+		const update = () => this.change(entry, () => this._history.update(entry));
+		this._entries.add(entry);
+		entry.connectObject(
+			// Copying the same content again gives the entry a new time, and a new place
 			'notify::datetime',
-			() => this.insertOrMoveItem(item, false),
-			// Delete item when deleted
-			'delete',
-			() => this.removeItem(item),
-			// Update search only when properties used by search can change.
+			() => this.change(entry, () => this._history.add(entry)),
+			// What a search looks at
 			'notify::content',
-			() => this.updateSearch(item),
-			'notify::pinned',
-			() => this.updateSearch(item),
-			'notify::tag',
-			() => this.updateSearch(item),
-			'notify::type',
-			() => this.updateSearch(item),
+			update,
 			'notify::metadata',
-			() => this.updateSearch(item),
+			update,
 			'notify::title',
-			() => this.updateSearch(item),
-			item,
+			update,
+			'notify::type',
+			update,
+			'notify::pinned',
+			update,
+			'notify::tag',
+			update,
+			'delete',
+			() => {
+				entry.disconnectObject(this);
+				this._entries.delete(entry);
+				this.change(entry, () => this._history.remove(entry));
+			},
+			this,
 		);
 	}
 
-	/** Puts the item before the first one that is not newer */
-	private placeItem(item: ClipboardItem): void {
-		if (item.get_parent() === this) this.remove_child(item);
+	/** Applies a change of the history; key focus on an item that leaves the list goes to the one in its place */
+	private change(entry: ClipboardEntry, apply: () => void): void {
+		const item = this._items.get(entry);
+		const focus = item?.has_key_focus() ? this._shown.indexOf(item) : -1;
 
-		// A loaded history arrives newest first, so each item belongs after all the others: no need to look
-		const last = this.get_last_child();
-		if (last instanceof ClipboardItem && last.entry.datetime.compare(item.entry.datetime) > 0) {
-			this.add_child(item);
-			return;
-		}
+		apply();
+		const removed = item !== undefined && !this._history.has(entry);
+		if (removed) this.destroyItem(entry, item);
+		this.reconcile(0);
 
-		let i = 0;
-		for (const c of this.get_children()) {
-			if (c instanceof ClipboardItem && c.entry.datetime.compare(item.entry.datetime) <= 0) {
-				this.insert_child_at_index(item, i);
-				return;
+		if (focus >= 0 && (removed || !item!.visible)) this.focusAt(focus);
+	}
+
+	/**
+	 * Shows the items of the window's entries, in order, and hides the others
+	 * @param budget How many missing items of the window to build now, first ones first, a few ms each; the others
+	 * are built in idle time
+	 */
+	private reconcile(budget: number): void {
+		const shown: ClipboardItem[] = [];
+		for (const entry of this._history.shown) {
+			let item = this._items.get(entry) ?? null;
+			if (!item && budget > 0) {
+				budget--;
+				item = this.build(entry);
 			}
-			i++;
+			if (item) shown.push(item);
 		}
+
+		this.display(shown);
+		this.updateStatus();
+		this.updatePseudoclasses();
+		this.scheduleBuild();
+	}
+
+	/** Makes `shown` the items shown, touching only those that come, go or move */
+	private display(shown: ClipboardItem[]): void {
+		const was = new Set(this._shown);
+		const is = new Set(shown);
+
+		for (const item of this._shown) {
+			if (is.has(item)) continue;
+
+			item.visible = false;
+			// Least recently shown first
+			this._items.delete(item.entry);
+			this._items.set(item.entry, item);
+		}
+
+		// Items that stay keep their order among themselves, unless one of their entries moved
+		const stay = shown.filter((item) => was.has(item));
+		const moved = this._shown.filter((item) => is.has(item)).some((item, i) => item !== stay[i]);
+		shown.forEach((item, i) => {
+			if (was.has(item) && !moved) return;
+
+			const previous = shown[i - 1];
+			if (previous) this.set_child_above_sibling(item, previous);
+			else this.set_child_below_sibling(item, null);
+			item.visible = true;
+		});
+
+		this._shown = shown;
+	}
+
+	private build(entry: ClipboardEntry): ClipboardItem | null {
+		if (this._unbuildable.has(entry)) return null;
+
+		const item = this.createItem(entry);
+		if (!item) {
+			this._unbuildable.add(entry);
+			return null;
+		}
+
+		item.visible = false;
 		this.add_child(item);
+		this._items.set(entry, item);
+		return item;
 	}
 
-	private insertOrMoveItem(item: ClipboardItem, search: boolean = true): void {
-		this.removePseudoclasses();
-		this.placeItem(item);
+	private destroyItem(entry: ClipboardEntry, item: ClipboardItem): void {
+		this._items.delete(entry);
+		this._shown = this._shown.filter((shown) => shown !== item);
+		if (this._first === item) this._first = null;
+		if (this._last === item) this._last = null;
+		if (this._lastFocus === item) this._lastFocus = null;
+		if (this._scrollTarget?.child === item) this._scrollTarget = null;
 
-		if (search && this._lastQuery) {
-			this.updateSearch(item);
+		// Destroyed, not just removed: an item still connected to the settings never gets collected
+		item.destroy();
+	}
+
+	private scheduleBuild(): void {
+		if (this._buildId) return;
+
+		this._buildId = GLib.idle_add(GLib.PRIORITY_LOW, () => {
+			if (this.buildStep()) return GLib.SOURCE_CONTINUE;
+
+			this._buildId = 0;
+			return GLib.SOURCE_REMOVE;
+		});
+	}
+
+	/**
+	 * One item's worth of idle work. Builds a missing item of the window, or else of the matches near it, and gives
+	 * it its styles and layout while it is hidden; or else destroys a few items no longer needed. Returns whether
+	 * there was work.
+	 */
+	private buildStep(): boolean {
+		const entry = [
+			...this._history.around(0, BUILD_AHEAD),
+			...this._history.around(-BUILD_AHEAD, 0).toReversed(),
+		].find((e) => !this._items.has(e) && !this._unbuildable.has(e));
+
+		if (entry === undefined) return this.evict();
+
+		const item = this.build(entry);
+		if (item) {
+			this.reconcile(0);
+			if (!this.mapped || !item.visible) item.prewarm();
+		}
+		return true;
+	}
+
+	private evict(): boolean {
+		const limit = this._shown.length + 2 * BUILD_AHEAD + KEEP;
+		if (this._items.size <= limit) return false;
+
+		const near = new Set(this._history.around(-BUILD_AHEAD, BUILD_AHEAD));
+		let evicted = 0;
+		for (const [entry, item] of this._items) {
+			if (evicted === EVICT_STEP || this._items.size <= limit) break;
+			if (item.visible || near.has(entry)) continue;
+
+			this.destroyItem(entry, item);
+			evicted++;
+		}
+		return evicted > 0;
+	}
+
+	private updateStatus(): void {
+		if (this._history.matchCount === 0) {
+			if (this._statusItem.get_parent() === null) this.add_child(this._statusItem);
+			this._statusItem.state = this._history.size === 0 ? State.Empty : State.NoResults;
+			this.x_align = Clutter.ActorAlign.CENTER;
+			this.x_expand = true;
+		} else if (this._statusItem.get_parent() !== null) {
+			this.remove_child(this._statusItem);
+			this.x_align = Clutter.ActorAlign.START;
+			this.x_expand = false;
+		}
+	}
+
+	/** Moves :first-child and :last-child to the first and last item shown, restyling only those that change */
+	private updatePseudoclasses(): void {
+		const status = this._statusItem.get_parent() === this ? this._statusItem : null;
+		const first = this._shown[0] ?? status;
+		const last = this._shown.at(-1) ?? status;
+
+		if (first !== this._first) {
+			this._first?.remove_style_pseudo_class('first-child');
+			first?.add_style_pseudo_class('first-child');
+			this._first = first;
+		}
+		if (last !== this._last) {
+			this._last?.remove_style_pseudo_class('last-child');
+			last?.add_style_pseudo_class('last-child');
+			this._last = last;
+		}
+	}
+
+	private focusedItem(): ClipboardItem | null {
+		const focus = global.stage.get_key_focus();
+		return focus instanceof ClipboardItem && focus.get_parent() === this ? focus : null;
+	}
+
+	private focusAt(index: number): void {
+		const item = this._shown[Math.min(index, this._shown.length - 1)];
+		if (item) {
+			this.focusChild(item);
 		} else {
-			this.applyWindow();
-			this.updateVisible();
+			this._lastFocus = null;
+			this.focusSearch();
 		}
 	}
 
-	public clearItems(): void {
-		this._revealed = WINDOW_START;
-		let focus = false;
-		for (const child of this.get_children()) {
-			if (child instanceof ClipboardItem) {
-				focus ||= child.has_key_focus();
-				// Destroyed, not just removed: an item still connected to the settings never gets collected
-				child.destroy();
-			}
-		}
-		this.updateVisible();
-
-		if (focus) {
-			// Navigate to the search entry
-			global.focus_manager.get_group(this).navigate_focus(this, St.DirectionType.UP, true);
-		}
+	private focusSearch(): void {
+		global.focus_manager.get_group(this).navigate_focus(this, St.DirectionType.UP, true);
 	}
 
-	public removeItem(child: ClipboardItem): void {
+	private nextFocus(child: Clutter.Actor, animate: boolean = true): void {
 		if (child.get_parent() !== this) return;
 
-		const hasKeyFocus = child.has_key_focus();
-		const index = this.get_children().indexOf(child);
-
-		child.destroy();
-		this.applyWindow();
-		this.updateVisible();
-
-		if (hasKeyFocus) {
-			// Pick the new focus only after the window is reapplied: removing the
-			// last revealed item reveals its successor, which should get the focus
-			const children = this.get_children();
-			let newFocus: Clutter.Actor | null = null;
-			for (let i = index; i < children.length && !newFocus; i++) {
-				if (children[i]!.visible) newFocus = children[i]!;
-			}
-			for (let i = Math.min(index, children.length) - 1; i >= 0 && !newFocus; i--) {
-				if (children[i]!.visible) newFocus = children[i]!;
-			}
-
-			if (newFocus && newFocus !== this._statusItem) {
-				this.focusChild(newFocus);
-			} else {
-				this._lastFocus = null;
-
-				// Navigate to the search entry
-				global.focus_manager.get_group(this).navigate_focus(this, St.DirectionType.UP, true);
-			}
-		}
-	}
-
-	public selectItem(index: number): boolean {
-		let i = 0;
-		for (const child of this.get_children()) {
-			if (child instanceof ClipboardItem && child.visible) {
-				if (i === index) {
-					this.focusChild(child);
-					return true;
-				}
-
-				i++;
-			}
-		}
-
-		return false;
-	}
-
-	public selectNextItem() {
-		let focusChild: ClipboardItem | null = null;
-
-		for (const child of this.get_children()) {
-			if (focusChild === null && child instanceof ClipboardItem && child.visible) {
-				focusChild = child;
-			}
-
-			if (child.has_key_focus()) {
-				this.nextFocus(child);
-				return;
-			}
-		}
-
-		if (focusChild !== null) {
-			this.focusChild(focusChild);
-		}
-	}
-
-	public search(query: SearchQuery): void {
-		// Copy search query, but with SearchChange.Different to always force re-search
-		this._lastQuery = query.withChange(SearchChange.Different);
-
-		this.removePseudoclasses();
-		let focusChild: ClipboardItem | null = null;
-		for (const child of this.get_children()) {
-			if (child instanceof ClipboardItem) {
-				if (child.has_key_focus()) focusChild = child;
-				child.search(query);
-			}
-		}
-
-		this._revealed = WINDOW_START;
-		this.applyWindow();
-		this.revealProgressively();
-
-		let firstVisible: ClipboardItem | null = null;
-		for (const child of this.get_children()) {
-			if (child instanceof ClipboardItem && child.visible) {
-				firstVisible = child;
-				break;
-			}
-		}
-		this.updateVisible();
-
-		if (focusChild && focusChild.visible) {
-			this.focusChild(focusChild, false);
-		} else if (this._lastFocus && this._lastFocus.visible) {
-			this.scrollToChild(this._lastFocus, false);
-		} else if (this._lastFocus instanceof ClipboardItem && this._lastFocus.matched) {
-			// Still matching, only outside the window: don't steal key focus
-		} else if (firstVisible !== null) {
-			this.focusChild(firstVisible, false);
-		}
-	}
-
-	private updateSearch(item: ClipboardItem): void {
-		if (!this._lastQuery) return;
-
-		const hasKeyFocus = item.has_key_focus();
-		this.removePseudoclasses();
-		item.search(this._lastQuery);
-		this.applyWindow();
-		this.updateVisible();
-		if (hasKeyFocus && !item.visible) this.nextFocus(item, false);
-	}
-
-	public activateFirst(): void {
-		const first = get_first_visible_child(this);
-		if (first instanceof St.Button) {
-			first.vfunc_clicked(1);
+		const newFocus = get_next_visible_sibling(child) ?? get_previous_visible_sibling(child);
+		if (newFocus && newFocus !== this._statusItem) {
+			this.focusChild(newFocus, animate);
+		} else {
+			// Navigate to the search entry
+			global.focus_manager.get_group(this).grab_key_focus();
 		}
 	}
 
@@ -482,19 +588,23 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 			return Clutter.EVENT_STOP;
 		}
 
-		// Keyboard navigation past the last revealed item extends the window
-		const forwardKey =
-			this.orientation === Clutter.Orientation.HORIZONTAL ? St.DirectionType.RIGHT : St.DirectionType.DOWN;
-		if (
-			from === get_last_visible_child(this) &&
-			(direction === St.DirectionType.TAB_FORWARD || direction === forwardKey)
-		) {
-			this.revealMore();
+		// Keyboard navigation past either end of the window extends it
+		const forward =
+			direction === St.DirectionType.TAB_FORWARD ||
+			direction === (this.horizontal ? St.DirectionType.RIGHT : St.DirectionType.DOWN);
+		const backward =
+			direction === St.DirectionType.TAB_BACKWARD ||
+			direction === (this.horizontal ? St.DirectionType.LEFT : St.DirectionType.UP);
+		if (forward && from === this._shown.at(-1) && this._history.extend(REVEAL_STEP)) {
+			this.reconcile(Infinity);
+		} else if (backward && from === this._shown[0] && this._history.extendBack(REVEAL_STEP)) {
+			this._revealedBack = true;
+			this.reconcile(Infinity);
 		}
 
 		const first = get_first_visible_child(this);
 		const last = get_last_visible_child(this);
-		if (this.orientation === Clutter.Orientation.HORIZONTAL) {
+		if (this.horizontal) {
 			// If up or shift tab navigation then focus the search entry
 			if (direction === St.DirectionType.UP) {
 				this._lastFocus = from;
@@ -552,8 +662,62 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 		return res;
 	}
 
+	override vfunc_allocate(box: Clutter.ActorBox): void {
+		const adjustment = this.adjustment;
+		const translation = this.translation(adjustment);
+		const anchor = this._scrollTarget ? null : this.anchor(adjustment, translation);
+		const transition = anchor ? adjustment.get_transition('value') : null;
+		const animation = transition && {
+			to: this.translation(adjustment, transition.interval.final as unknown as number),
+			left: transition.get_duration() - transition.get_elapsed_time(),
+		};
+
+		super.vfunc_allocate(box);
+		this._revealedBack = false;
+
+		if (this._scrollTarget) {
+			const { child, animate } = this._scrollTarget;
+			this._scrollTarget = null;
+			if (child.get_parent() === this && child.visible) this.scrollToChild(child, animate);
+			return;
+		}
+		if (!anchor?.child.visible) return;
+
+		// Content changed in front of what is in view. The view follows it, and a scroll animation in progress goes on
+		// to its target, moved as much. In a right-to-left list the value changes even when the child does not move.
+		const shift = this.span(anchor.child)[0] - anchor.start;
+		const value = this.valueAt(adjustment, translation + shift);
+		if (value === adjustment.value) return;
+
+		adjustment.remove_transition('value');
+		adjustment.value = value;
+		if (animation && animation.left > 0) {
+			adjustment.ease(this.valueAt(adjustment, animation.to + shift), {
+				duration: animation.left,
+				mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+			});
+		}
+	}
+
+	/**
+	 * The child that keeps its place on screen when the layout changes, the first one in view. There is none at the
+	 * start of the list, so that what is added in front shows, unless it was revealed to scroll back into.
+	 */
+	private anchor(adjustment: St.Adjustment, translation: number): { child: Clutter.Actor; start: number } | null {
+		if (!this.mapped || (adjustment.value <= 0 && !this._revealedBack)) return null;
+
+		for (const child of this._shown) {
+			if (!child.has_allocation()) continue;
+
+			const [start, end] = this.span(child);
+			if (end > translation && start < translation + adjustment.page_size) return { child, start };
+		}
+		return null;
+	}
+
 	override vfunc_map(): void {
 		this._lastFocus = null;
+		this._scrollTarget = null;
 		this.hadjustment.value = 0;
 		this.vadjustment.value = 0;
 

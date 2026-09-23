@@ -12,7 +12,6 @@ import { Icon } from '../../common/icons.js';
 import { MiddleClickAction } from '../../common/settings.js';
 import { ClipboardEntry } from '../../database/database.js';
 import { Shortcut } from '../../misc/shortcuts.js';
-import { SearchQuery } from '../searchEntry.js';
 import { ClipboardItemHeader } from './clipboardItemHeader.js';
 
 @registerClass({
@@ -33,7 +32,6 @@ export class ClipboardItem extends St.Button {
 	private _protectPinned: boolean = true;
 	private _protectTagged: boolean = true;
 	private _middleClickAction: MiddleClickAction = MiddleClickAction.None;
-	private _matched: boolean = true;
 
 	private readonly _box: St.Widget;
 	private readonly _header: ClipboardItemHeader;
@@ -138,18 +136,6 @@ export class ClipboardItem extends St.Button {
 		return (focus | hover | active) as ActiveState;
 	}
 
-	/**
-	 * Whether the item matches the current search query. Actual visibility is
-	 * decided by the container, which windows the matched items.
-	 */
-	get matched(): boolean {
-		return this._matched;
-	}
-
-	public search(query: SearchQuery) {
-		this._matched = query.matchesEntry(this._matched, this.entry, ...this.searchTexts());
-	}
-
 	/** Computes styles and text layout while hidden, which the first frame that shows the item would otherwise do */
 	public prewarm() {
 		const computeStyles = (actor: Clutter.Actor) => {
@@ -158,11 +144,6 @@ export class ClipboardItem extends St.Button {
 		};
 		computeStyles(this);
 		this.get_preferred_height(this.width);
-	}
-
-	/** The texts the search query is matched against */
-	protected searchTexts(): string[] {
-		return [this.entry.content];
 	}
 
 	private updateSize() {

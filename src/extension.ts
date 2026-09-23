@@ -252,11 +252,16 @@ export default class CopyousExtension extends Extension {
 		);
 	}
 
-	public connectHljsInit(fn: () => void) {
-		if (this.hljs != null) return;
+	/** Calls fn once highlight.js is loaded, unless it is already; returns what stops the waiting */
+	public connectHljsInit(fn: () => void): () => void {
+		if (this.hljs != null) return () => {};
 
 		this.hljsCallbacks ??= [];
 		this.hljsCallbacks.push(fn);
+		return () => {
+			const i = this.hljsCallbacks?.indexOf(fn) ?? -1;
+			if (i >= 0) this.hljsCallbacks!.splice(i, 1);
+		};
 	}
 
 	private async initEntryTracker() {

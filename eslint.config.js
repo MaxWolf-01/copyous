@@ -134,6 +134,13 @@ export default [
 	},
 	prettier,
 	{
+		// node:test runs the tests it is given without being awaited
+		files: ['tests/**/*.ts'],
+		rules: {
+			'@typescript-eslint/no-floating-promises': 'off',
+		},
+	},
+	{
 		ignores: ['src/thirdparty/*'],
 	},
 ];

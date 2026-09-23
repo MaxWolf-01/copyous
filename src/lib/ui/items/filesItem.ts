@@ -13,6 +13,14 @@ import { ContentPreview } from '../components/contentPreview.js';
 import { ClipboardItem } from './clipboardItem.js';
 import { formatFile } from './fileItem.js';
 
+/** The local files in the content of a Files entry, one URI per line */
+export function parseFiles(content: string): Gio.File[] {
+	return content
+		.split('\n')
+		.map((uri) => Gio.File.new_for_uri(uri))
+		.filter((file) => file.get_path() !== null);
+}
+
 export function commonDirectory(files: Gio.File[]): Gio.File {
 	return files
 		.map((f) => f.get_parent())
@@ -132,18 +140,12 @@ export class FilesPreview extends ContentPreview {
 
 @registerClass()
 export class FilesItem extends ClipboardItem {
-	private readonly _files: string[];
-	private readonly _formattedFiles?: string[];
-
 	constructor(ext: CopyousExtension, entry: ClipboardEntry) {
 		super(ext, entry, Icon.Folder, _('Files'));
 
 		this.add_style_class_name('files-item');
 
-		const files: Gio.File[] = entry.content
-			.split('\n')
-			.map((f: string) => Gio.File.new_for_uri(f))
-			.filter((f) => f.get_path() !== null);
+		const files = parseFiles(entry.content);
 		const common = commonDirectory(files);
 
 		const filePath = new St.Label({
@@ -155,14 +157,5 @@ export class FilesItem extends ClipboardItem {
 
 		const relativeFiles = files.map((f) => common.get_relative_path(f)).filter((f) => f !== null);
 		this._content.add_child(new FilesPreview(relativeFiles));
-
-		this._files = files.map((f) => f.get_path()?.toLowerCase() ?? '');
-		if (filePath.text.startsWith('~')) {
-			this._formattedFiles = files.map((f) => formatFile(f).toLowerCase());
-		}
-	}
-
-	protected override searchTexts(): string[] {
-		return [...this._files, ...(this._formattedFiles ?? [])];
 	}
 }

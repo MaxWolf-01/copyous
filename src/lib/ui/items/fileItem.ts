@@ -70,10 +70,6 @@ export class FileItem extends ClipboardItem {
 		this.updateFilePreview().catch(logger.error.bind(logger));
 	}
 
-	protected override searchTexts(): string[] {
-		return [this.entry.content.substring('file://'.length), this._file.text];
-	}
-
 	private async updateFilePreview() {
 		this._filePreviewVisibility = this.fileItemSettings.get_enum('file-preview-visibility');
 		this._filePreviewTypes = this.fileItemSettings.get_flags('file-preview-types');

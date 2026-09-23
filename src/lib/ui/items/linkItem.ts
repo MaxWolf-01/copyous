@@ -82,6 +82,9 @@ export class LinkPreview extends St.Widget {
 		this._singleUrl.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
 		this.add_child(this._singleUrl);
 
+		// Destroyed as a child of an item, from C, an override of destroy() would not run
+		this.connect('destroy', () => this._cancellable.cancel());
+
 		this.configureMetadata();
 	}
 
@@ -282,11 +285,6 @@ export class LinkPreview extends St.Widget {
 			this._singleUrl.allocate(Clutter.ActorBox.new(x, y, width, height));
 		}
 	}
-
-	override destroy() {
-		this._cancellable.cancel();
-		super.destroy();
-	}
 }
 
 @registerClass()
@@ -322,14 +320,6 @@ export class LinkItem extends ClipboardItem {
 		this.updateLinkPreview().catch(() => {});
 	}
 
-	protected override searchTexts(): string[] {
-		const metadata: LinkMetadata = { title: null, description: null, image: null, ...this.entry.metadata };
-		const searchTexts = [this.entry.content];
-		if (metadata.title) searchTexts.push(metadata.title);
-		if (metadata.description) searchTexts.push(metadata.description);
-		return searchTexts;
-	}
-
 	private async updateLinkPreview() {
 		const patterns = this.linkItemSettings.get_strv('link-preview-exclusion-patterns');
 
@@ -362,6 +352,9 @@ export class LinkItem extends ClipboardItem {
 			this._linkPreview.metadata ??= metadata;
 		} else if (show) {
 			const metadata = await tryGetMetadata(this.ext, url, this._cancellable);
+			// Cancelled, as when the item is destroyed, the fetch found nothing: kept, it would never be fetched again
+			if (this._cancellable.is_cancelled()) return;
+
 			this.entry.metadata = metadata;
 			this._linkPreview.metadata = metadata;
 		}

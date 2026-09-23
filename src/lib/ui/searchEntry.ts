@@ -10,99 +10,10 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
 import type CopyousExtension from '../../extension.js';
 import { ItemType, ItemTypes, Tag, Tags } from '../common/constants.js';
-import { enumParamSpec, registerClass } from '../common/gjs.js';
+import { registerClass } from '../common/gjs.js';
+import type { SearchQuery } from '../common/historyList.js';
 import { Icon, loadIcon } from '../common/icons.js';
-import { ClipboardEntry } from '../database/database.js';
 import { TagsItem } from './components/tagsItem.js';
-
-const SearchCollator = new Intl.Collator(undefined, { sensitivity: 'base' });
-
-function localeContains(text: string, query: string): boolean {
-	for (let offset = 0; offset <= text.length - query.length; offset++) {
-		const comparison = SearchCollator.compare(text.substring(offset, offset + query.length), query);
-		if (comparison === 0) return true;
-	}
-	return false;
-}
-
-export const SearchChange = {
-	Same: 0,
-	Different: 1,
-	LessStrict: 2,
-	MoreStrict: 3,
-} as const;
-
-export type SearchChange = (typeof SearchChange)[keyof typeof SearchChange];
-
-@registerClass({
-	Properties: {
-		'change': enumParamSpec('change', GObject.ParamFlags.READABLE, SearchChange, 0),
-		'query': GObject.ParamSpec.string('query', null, null, GObject.ParamFlags.READABLE, ''),
-		'pinned': GObject.ParamSpec.boolean('pinned', null, null, GObject.ParamFlags.READABLE, false),
-		'exclude-pinned': GObject.ParamSpec.boolean('exclude-pinned', null, null, GObject.ParamFlags.READABLE, false),
-		'tag': GObject.ParamSpec.string('tag', null, null, GObject.ParamFlags.READABLE, ''),
-		'exclude-tagged': GObject.ParamSpec.boolean('exclude-tagged', null, null, GObject.ParamFlags.READABLE, false),
-		'type': GObject.ParamSpec.string('type', null, null, GObject.ParamFlags.READABLE, ''),
-	},
-})
-export class SearchQuery extends GObject.Object {
-	constructor(
-		readonly change: SearchChange,
-		readonly query: string,
-		readonly pinned: boolean,
-		readonly excludePinned: boolean,
-		readonly tag: Tag | null,
-		readonly excludeTagged: boolean,
-		readonly type: ItemType | null,
-	) {
-		super();
-	}
-
-	public matchesPinned(pinned: boolean): boolean {
-		return (!this.pinned && !this.excludePinned) || this.pinned === pinned;
-	}
-
-	public matchesTag(tag: Tag | null): boolean {
-		return (this.tag === null && !this.excludeTagged) || this.tag === tag;
-	}
-
-	public matchesType(type: ItemType): boolean {
-		return this.type === null || this.type === type;
-	}
-
-	public matchesProperties(pinned: boolean, tag: Tag | null, type: ItemType): boolean {
-		return this.matchesPinned(pinned) && this.matchesTag(tag) && this.matchesType(type);
-	}
-
-	public matchesQuery(...text: string[]): boolean {
-		if (this.query.length === 0) return true;
-		if (text.length === 0) return false;
-
-		return text.some((s) => localeContains(s, this.query));
-	}
-
-	public matchesEntry(state: boolean, entry: ClipboardEntry, ...text: string[]): boolean {
-		if (this.change === SearchChange.Same) return state;
-		if (this.change === SearchChange.LessStrict && state) return true;
-		if (this.change === SearchChange.MoreStrict && !state) return false;
-
-		if (!this.matchesProperties(entry.pinned, entry.tag, entry.type)) return false;
-		if (this.matchesQuery(...text)) return true;
-		return entry.title ? this.matchesQuery(entry.title) : false;
-	}
-
-	public withChange(change: SearchChange): SearchQuery {
-		return new SearchQuery(
-			change,
-			this.query,
-			this.pinned,
-			this.excludePinned,
-			this.tag,
-			this.excludeTagged,
-			this.type,
-		);
-	}
-}
 
 @registerClass()
 class ItemPopupMenuItem extends PopupMenu.PopupMenuItem {
@@ -253,13 +164,12 @@ class ItemPopupMenu extends PopupMenu.PopupMenu<ItemPopupMenuSignals> {
 	},
 	Signals: {
 		search: {
-			param_types: [SearchQuery.$gtype],
+			param_types: [GObject.TYPE_JSOBJECT],
 		},
 		activate: {},
 	},
 })
 export class SearchEntry extends St.Entry {
-	private _prevSearch: SearchQuery | null = null;
 	private _pinned: boolean = false;
 	private _tag: Tag | null = null;
 	private _type: ItemType | null = null;
@@ -416,73 +326,18 @@ export class SearchEntry extends St.Entry {
 	}
 
 	get searchQuery(): SearchQuery {
-		const excludePinned = this.ext.settings.get_boolean('exclude-pinned');
-		const excludeTagged = this.ext.settings.get_boolean('exclude-tagged');
-		const query = this.text;
-
-		let change: SearchChange;
-		if (!this._prevSearch) {
-			change = SearchChange.Different;
-		} else {
-			// Query
-			let queryChange: SearchChange;
-			if (query === this._prevSearch.query) queryChange = SearchChange.Same;
-			else if (query.includes(this._prevSearch.query)) queryChange = SearchChange.MoreStrict;
-			else if (this._prevSearch.query.includes(query)) queryChange = SearchChange.LessStrict;
-			else queryChange = SearchChange.Different;
-
-			change = queryChange;
-
-			// Pinned
-			const prevUnpinned = this._prevSearch.matchesPinned(false);
-			const prevPinned = this._prevSearch.matchesPinned(true);
-			const unpinned = (!this.pinned && !excludePinned) || !this.pinned;
-			const pinned = (!this.pinned && !excludePinned) || this.pinned;
-
-			let pinnedChange: SearchChange;
-			if (prevUnpinned === unpinned && prevPinned === pinned) pinnedChange = SearchChange.Same;
-			else if (prevUnpinned !== unpinned && prevPinned !== pinned) pinnedChange = SearchChange.Different;
-			else if ((prevUnpinned && !unpinned) || (prevPinned && !pinned)) pinnedChange = SearchChange.MoreStrict;
-			else pinnedChange = SearchChange.LessStrict;
-
-			if (pinnedChange !== SearchChange.Same)
-				change =
-					change === SearchChange.Same || change === pinnedChange ? pinnedChange : SearchChange.Different;
-
-			// Tagged
-			let taggedChange: SearchChange;
-			if (this._prevSearch.excludeTagged !== excludeTagged) taggedChange = SearchChange.Different;
-			else if (this.tag !== null) {
-				if (this._prevSearch.tag === null && !excludeTagged) taggedChange = SearchChange.MoreStrict;
-				else if (this._prevSearch.tag === this.tag) taggedChange = SearchChange.Same;
-				else taggedChange = SearchChange.Different;
-			} else {
-				if (this._prevSearch.tag === null) taggedChange = SearchChange.Same;
-				else if (excludeTagged) taggedChange = SearchChange.Different;
-				else taggedChange = SearchChange.LessStrict;
-			}
-
-			if (taggedChange !== SearchChange.Same)
-				change =
-					change === SearchChange.Same || change === taggedChange ? taggedChange : SearchChange.Different;
-
-			// Type
-			let typeChange: SearchChange;
-			if (this._prevSearch.type === this.type) typeChange = SearchChange.Same;
-			else if (this.type === null) typeChange = SearchChange.LessStrict;
-			else if (this._prevSearch.type === null) typeChange = SearchChange.MoreStrict;
-			else typeChange = SearchChange.Different;
-
-			if (typeChange !== SearchChange.Same)
-				change = change === SearchChange.Same || change === typeChange ? typeChange : SearchChange.Different;
-		}
-
-		return new SearchQuery(change, query, this.pinned, excludePinned, this.tag, excludeTagged, this.type);
+		return {
+			text: this.text,
+			pinned: this.pinned,
+			excludePinned: this.ext.settings.get_boolean('exclude-pinned'),
+			tag: this.tag,
+			excludeTagged: this.ext.settings.get_boolean('exclude-tagged'),
+			type: this.type,
+		};
 	}
 
 	private search() {
-		this._prevSearch = this.searchQuery;
-		this.emit('search', this._prevSearch);
+		this.emit('search', this.searchQuery);
 	}
 
 	public selectTag(index: number) {
