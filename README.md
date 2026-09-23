@@ -58,6 +58,7 @@ For the extension to work optimally you need to install the following dependenci
 3. Build and install the extension:
    ```shell
    pnpm install
+   make install
    ```
 4. Restart the session by logging out.
 5. Enable the extension in [Extension Manager](https://flathub.org/en/apps/com.mattjakeman.ExtensionManager) or by running the following command:

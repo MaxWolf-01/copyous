@@ -36,7 +36,7 @@
 	"scripts": {
 		"clean": "make clean",
 		"build": "make build",
-		"install": "make install",
+		"install-extension": "make install",
 		"launch": "make launch",
 		"launch-settings": "make launch-settings",
 		"lint": "make lint",
