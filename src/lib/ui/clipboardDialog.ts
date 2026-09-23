@@ -23,6 +23,7 @@ import { ClipboardEntry } from '../database/database.js';
 import { VERSION } from '../misc/compatibility.js';
 import { ClipboardScrollView } from './clipboardScrollView.js';
 import { ClipboardItemMenu } from './components/clipboardItemMenu.js';
+import { holdImageDecodes } from './components/contentPreview.js';
 import { ConfirmClearHistoryDialog } from './indicator.js';
 import { CharacterItem } from './items/characterItem.js';
 import { CodeItem } from './items/codeItem.js';
@@ -486,6 +487,7 @@ export class ClipboardDialog extends St.Widget {
 
 		this.opened = true;
 		global.compositor.disable_unredirect();
+		holdImageDecodes();
 
 		// Perf telemetry: consecutive segments of open(), ending at first paint.
 		// map/fit/focus happen inside show() via vfunc_map.
@@ -524,6 +526,10 @@ export class ClipboardDialog extends St.Widget {
 			scaleY: 1,
 			duration: ANIMATION_TIME,
 			mode,
+			// The rest of the list is built after the fade-in, so its frames stay light
+			onComplete: () => {
+				if (this.opened) this._scrollView.revealProgressively();
+			},
 		});
 	}
 
@@ -577,6 +583,7 @@ export class ClipboardDialog extends St.Widget {
 				// Shrink the window back while hidden so the next open maps
 				// and lays out only the initial chunk
 				this._scrollView.resetWindow();
+				this._scrollView.prewarm();
 				global.compositor.enable_unredirect();
 			},
 		});
@@ -672,6 +679,7 @@ export class ClipboardDialog extends St.Widget {
 		);
 
 		this._scrollView.addItem(item);
+		if (!this.opened) this._scrollView.prewarm();
 	}
 
 	public dialogShortcut() {
