@@ -50,9 +50,9 @@ export class ClipboardScrollView extends St.ScrollView {
 		this.connect('notify::width', this.scrollbarWorkaround.bind(this));
 		this._scrollContainer.connect('notify::width', this.scrollbarWorkaround.bind(this));
 
-		// Reveal more windowed items when scrolling approaches the end
-		this.hadjustment.connect('notify::value', () => this.onScrolled(this.hadjustment));
-		this.vadjustment.connect('notify::value', () => this.onScrolled(this.vadjustment));
+		// Reveal more windowed items as scrolling approaches the end
+		this.hadjustment.connect('notify::value', () => this.onScrolled());
+		this.vadjustment.connect('notify::value', () => this.onScrolled());
 
 		// Without overflow there are no scroll events, so hidden matches would be
 		// unreachable by mouse; keep revealing until the list overflows or runs out
@@ -90,8 +90,8 @@ export class ClipboardScrollView extends St.ScrollView {
 		this.updateScrollbar();
 	}
 
-	public addItem(item: ClipboardItem) {
-		this._scrollContainer.addItem(item);
+	public addItems(items: ClipboardItem[]) {
+		this._scrollContainer.addItems(items);
 	}
 
 	public clearItems() {
@@ -135,19 +135,12 @@ export class ClipboardScrollView extends St.ScrollView {
 		}
 	}
 
-	private onScrolled(adjustment: St.Adjustment) {
+	private onScrolled() {
 		// Adjustment resets while mapping are not user scrolling
 		if (!this._scrollContainer.mapped) return;
 
 		holdImageDecodes();
-
-		// In RTL horizontal lists the end of the list is at the lower bound
-		const rtl =
-			this.text_direction === Clutter.TextDirection.RTL && this.orientation === Clutter.Orientation.HORIZONTAL;
-		const nearEnd = rtl
-			? adjustment.value <= adjustment.lower + adjustment.page_size * 2
-			: adjustment.value + adjustment.page_size * 2 >= adjustment.upper;
-		if (nearEnd) this._scrollContainer.revealMore();
+		this._scrollContainer.revealProgressively();
 	}
 
 	private updateSize() {

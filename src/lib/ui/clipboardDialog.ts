@@ -26,6 +26,7 @@ import { ClipboardItemMenu } from './components/clipboardItemMenu.js';
 import { holdImageDecodes } from './components/contentPreview.js';
 import { ConfirmClearHistoryDialog } from './indicator.js';
 import { CharacterItem } from './items/characterItem.js';
+import { ClipboardItem } from './items/clipboardItem.js';
 import { CodeItem } from './items/codeItem.js';
 import { ColorItem } from './items/colorItem.js';
 import { FileItem } from './items/fileItem.js';
@@ -37,6 +38,11 @@ import { CenterBox, CollapsibleHeaderLayout, FitConstraint } from './layout.js';
 import { SearchEntry, SearchQuery } from './searchEntry.js';
 
 const ANIMATION_TIME = 150;
+
+// A loaded history is built this many items at once, the rest in idle time, this many ms of it at a time. Building
+// an item costs a few ms; enable(), which every screen unlock calls, blocked the shell for the whole history at once.
+const FIRST_ENTRIES = 10;
+const ENTRY_BUDGET_MS = 8;
 
 @registerClass()
 class IncognitoButton extends St.Button {
@@ -263,6 +269,8 @@ export class ClipboardDialog extends St.Widget {
 	private _cursor: [number, number] | null = null;
 
 	private _orientation: Clutter.Orientation = Clutter.Orientation.HORIZONTAL;
+	private _pendingEntries: ClipboardEntry[] = [];
+	private _pendingId: number = 0;
 	private _perf: number[] | undefined;
 	private _perfPaintId: number = -1;
 
@@ -411,6 +419,7 @@ export class ClipboardDialog extends St.Widget {
 			this._perfPaintId = -1;
 		}
 
+		this.dropPendingEntries();
 		super.destroy();
 	}
 
@@ -590,6 +599,62 @@ export class ClipboardDialog extends St.Widget {
 	}
 
 	public addEntry(entry: ClipboardEntry): void {
+		// A new copy of content still waiting to be built comes in as that entry
+		this.dropPendingEntry(entry);
+
+		const item = this.createItem(entry);
+		if (!item) return;
+
+		this._scrollView.addItems([item]);
+		if (!this.opened) this._scrollView.prewarm();
+	}
+
+	/** Adds a loaded history: the newest entries right away, the rest in idle time */
+	public addEntries(entries: ClipboardEntry[]): void {
+		this.dropPendingEntries();
+
+		const newestFirst = [...entries].sort((a, b) => b.datetime.compare(a.datetime));
+		const first = newestFirst.splice(0, FIRST_ENTRIES);
+		this._scrollView.addItems(first.map((entry) => this.createItem(entry)).filter((item) => item !== null));
+
+		this._pendingEntries = newestFirst;
+		for (const entry of newestFirst) {
+			entry.connectObject('delete', () => this.dropPendingEntry(entry), this);
+		}
+
+		this._pendingId = GLib.idle_add(GLib.PRIORITY_LOW, () => {
+			const start = GLib.get_monotonic_time();
+			const items: ClipboardItem[] = [];
+			while (this._pendingEntries.length > 0 && GLib.get_monotonic_time() - start < ENTRY_BUDGET_MS * 1000) {
+				const entry = this._pendingEntries.shift()!;
+				entry.disconnectObject(this);
+				const item = this.createItem(entry);
+				if (item) items.push(item);
+			}
+			this._scrollView.addItems(items);
+
+			if (this._pendingEntries.length > 0) return GLib.SOURCE_CONTINUE;
+			this._pendingId = 0;
+			if (!this.opened) this._scrollView.prewarm();
+			return GLib.SOURCE_REMOVE;
+		});
+	}
+
+	private dropPendingEntry(entry: ClipboardEntry) {
+		const i = this._pendingEntries.indexOf(entry);
+		if (i < 0) return;
+		this._pendingEntries.splice(i, 1);
+		entry.disconnectObject(this);
+	}
+
+	private dropPendingEntries() {
+		if (this._pendingId) GLib.source_remove(this._pendingId);
+		this._pendingId = 0;
+		for (const entry of this._pendingEntries) entry.disconnectObject(this);
+		this._pendingEntries = [];
+	}
+
+	private createItem(entry: ClipboardEntry): ClipboardItem | null {
 		let item;
 		try {
 			item = (() => {
@@ -617,11 +682,11 @@ export class ClipboardDialog extends St.Widget {
 
 			if (!item) {
 				this.ext.logger.error('Unknown item type', entry);
-				return;
+				return null;
 			}
 		} catch (e) {
 			this.ext.logger.error(e);
-			return;
+			return null;
 		}
 
 		// Connect edit
@@ -678,8 +743,7 @@ export class ClipboardDialog extends St.Widget {
 			this,
 		);
 
-		this._scrollView.addItem(item);
-		if (!this.opened) this._scrollView.prewarm();
+		return item;
 	}
 
 	public dialogShortcut() {
@@ -693,6 +757,7 @@ export class ClipboardDialog extends St.Widget {
 	}
 
 	public clearEntries() {
+		this.dropPendingEntries();
 		this._scrollView.clearItems();
 	}
 

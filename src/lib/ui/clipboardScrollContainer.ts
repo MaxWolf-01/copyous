@@ -21,10 +21,12 @@ import { SearchChange, SearchQuery } from './searchEntry.js';
 // history on every open is what froze the shell (#150).
 const WINDOW_START = 10;
 
-// Matched items revealed per frame once the dialog is open, until all are. An
-// item shown for the first time costs a few ms of style, layout and paint;
-// revealing twenty in one frame froze scrolling for over 100 ms.
+// Matched items revealed per frame once the dialog is open, while fewer than
+// REVEAL_AHEAD pages of them lie beyond the visible part. An item shown for the
+// first time costs a few ms of style, layout and paint; revealing twenty in one
+// frame froze scrolling for over 100 ms. Scrolling reveals further.
 const REVEAL_STEP = 2;
+const REVEAL_AHEAD = 3;
 
 @registerClass()
 export class ClipboardScrollContainer extends St.BoxLayout {
@@ -78,12 +80,12 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 		this.setRevealed(Number.MAX_SAFE_INTEGER);
 	}
 
-	/** Reveals the hidden matches a few per frame, before each frame's layout, for as long as the list is shown */
+	/** Reveals hidden matches a few per frame, before each frame's layout, until REVEAL_AHEAD pages are ready */
 	public revealProgressively(): void {
-		if (this._revealLaterId || !this.mapped || !this.hasHiddenMatches()) return;
+		if (this._revealLaterId || !this.wantsMore()) return;
 
 		this._revealLaterId = global.compositor.get_laters().add(Meta.LaterType.BEFORE_REDRAW, () => {
-			if (this.mapped && this.hasHiddenMatches()) {
+			if (this.wantsMore()) {
 				this.setRevealed(this._revealed + REVEAL_STEP);
 				return GLib.SOURCE_CONTINUE;
 			}
@@ -91,6 +93,19 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 			this._revealLaterId = 0;
 			return GLib.SOURCE_REMOVE;
 		});
+	}
+
+	private wantsMore(): boolean {
+		if (!this.mapped || !this.hasHiddenMatches()) return false;
+
+		const horizontal = this.orientation === Clutter.Orientation.HORIZONTAL;
+		const adjustment = horizontal ? this.hadjustment : this.vadjustment;
+		// In RTL horizontal lists the end of the list is at the lower bound
+		const ahead =
+			horizontal && this.text_direction === Clutter.TextDirection.RTL
+				? adjustment.value - adjustment.lower
+				: adjustment.upper - adjustment.value - adjustment.page_size;
+		return ahead < REVEAL_AHEAD * adjustment.page_size;
 	}
 
 	private stopRevealing(): void {
@@ -220,9 +235,21 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 		}
 	}
 
-	public addItem(item: ClipboardItem): void {
-		this.insertOrMoveItem(item);
+	/** Adds items at their place by date, then applies the search and the window once for all of them */
+	public addItems(items: ClipboardItem[]): void {
+		if (items.length === 0) return;
 
+		this.removePseudoclasses();
+		for (const item of items) {
+			this.placeItem(item);
+			this.connectEntry(item);
+			if (this._lastQuery) item.search(this._lastQuery);
+		}
+		this.applyWindow();
+		this.updateVisible();
+	}
+
+	private connectEntry(item: ClipboardItem): void {
 		// The connections go with the item: a destroyed item must not be re-inserted or searched
 		item.entry.connectObject(
 			// Move item when datetime changes
@@ -248,23 +275,31 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 		);
 	}
 
-	private insertOrMoveItem(item: ClipboardItem, search: boolean = true): void {
-		this.removePseudoclasses();
-
+	/** Puts the item before the first one that is not newer */
+	private placeItem(item: ClipboardItem): void {
 		if (item.get_parent() === this) this.remove_child(item);
+
+		// A loaded history arrives newest first, so each item belongs after all the others: no need to look
+		const last = this.get_last_child();
+		if (last instanceof ClipboardItem && last.entry.datetime.compare(item.entry.datetime) > 0) {
+			this.add_child(item);
+			return;
+		}
 
 		let i = 0;
 		for (const c of this.get_children()) {
 			if (c instanceof ClipboardItem && c.entry.datetime.compare(item.entry.datetime) <= 0) {
 				this.insert_child_at_index(item, i);
-				break;
+				return;
 			}
 			i++;
 		}
+		this.add_child(item);
+	}
 
-		if (i === this.get_n_children()) {
-			this.add_child(item);
-		}
+	private insertOrMoveItem(item: ClipboardItem, search: boolean = true): void {
+		this.removePseudoclasses();
+		this.placeItem(item);
 
 		if (search && this._lastQuery) {
 			this.updateSearch(item);
