@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Copyous\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-09 16:27+0000\n"
+"POT-Creation-Date: 2026-09-23 20:14+0000\n"
 "PO-Revision-Date: 2026-03-18 07:29+0300\n"
 "Last-Translator: Muha Aliss <muhaaliss@pm.me>\n"
 "Language-Team: Turkish\n"
@@ -156,21 +156,21 @@ msgstr "Kod"
 #: src/lib/preferences/actions/actionDialog.ts:177
 #: src/lib/preferences/actions/actionDialog.ts:370
 #: src/lib/preferences/customization/items/fileItemCustomization.ts:79
-#: src/lib/ui/items/imageItem.ts:38
+#: src/lib/ui/items/imageItem.ts:37
 msgid "Image"
 msgstr "Resim"
 
 #: src/lib/preferences/actions/actionDefaults.ts:144
 #: src/lib/preferences/actions/actionDialog.ts:178
 #: src/lib/preferences/actions/actionDialog.ts:373
-#: src/lib/ui/items/fileItem.ts:52
+#: src/lib/ui/items/fileItem.ts:51
 msgid "File"
 msgstr "Dosya"
 
 #: src/lib/preferences/actions/actionDefaults.ts:148
 #: src/lib/preferences/actions/actionDialog.ts:179
 #: src/lib/preferences/actions/actionDialog.ts:376
-#: src/lib/ui/items/filesItem.ts:140
+#: src/lib/ui/items/filesItem.ts:144
 msgid "Files"
 msgstr "Dosyalar"
 
@@ -178,7 +178,7 @@ msgstr "Dosyalar"
 #: src/lib/preferences/actions/actionDialog.ts:180
 #: src/lib/preferences/actions/actionDialog.ts:379
 #: src/lib/preferences/customization/items/linkItemCustomization.ts:45
-#: src/lib/ui/items/linkItem.ts:303
+#: src/lib/ui/items/linkItem.ts:300
 msgid "Link"
 msgstr "Bağlantı"
 
@@ -1488,7 +1488,7 @@ msgstr ""
 "pano geçmişine ne yapılacağını seç"
 
 #: src/lib/preferences/general/historySettings.ts:137
-#: src/lib/ui/clipboardDialog.ts:130 src/lib/ui/clipboardDialog.ts:235
+#: src/lib/ui/clipboardDialog.ts:126 src/lib/ui/clipboardDialog.ts:231
 #: src/lib/ui/indicator.ts:54
 msgid "Clear"
 msgstr "Temizle"
@@ -1796,25 +1796,25 @@ msgstr[1] "%d Dosya"
 msgid "Char"
 msgstr "Karakter"
 
-#: src/lib/ui/items/filesItem.ts:120
+#: src/lib/ui/items/filesItem.ts:127
 #, javascript-format
 msgid "%d more file"
 msgid_plural "%d more files"
 msgstr[0] "%d dosya daha"
 msgstr[1] "%d dosya daha"
 
-#: src/lib/ui/items/filesItem.ts:121
+#: src/lib/ui/items/filesItem.ts:128
 #, javascript-format
 msgid "%d file"
 msgid_plural "%d files"
 msgstr[0] "%d dosya"
 msgstr[1] "%d dosya"
 
-#: src/lib/ui/items/linkItem.ts:95
+#: src/lib/ui/items/linkItem.ts:97
 msgid "No Title"
 msgstr "Başlık Yok"
 
-#: src/lib/ui/items/linkItem.ts:97
+#: src/lib/ui/items/linkItem.ts:99
 msgid "No Description"
 msgstr "Açıklama Yok"
 
@@ -1826,43 +1826,43 @@ msgstr "Pano Boş"
 msgid "No Items Found"
 msgstr "Öğe Bulunamadı"
 
-#: src/lib/ui/searchEntry.ts:151
+#: src/lib/ui/searchEntry.ts:62
 msgid "__All"
 msgstr "__Hepsi"
 
-#: src/lib/ui/searchEntry.ts:155
+#: src/lib/ui/searchEntry.ts:66
 msgid "__Text"
 msgstr "__Metin"
 
-#: src/lib/ui/searchEntry.ts:156
+#: src/lib/ui/searchEntry.ts:67
 msgid "__Code"
 msgstr "__Kod"
 
-#: src/lib/ui/searchEntry.ts:157
+#: src/lib/ui/searchEntry.ts:68
 msgid "__Image"
 msgstr "__Resim"
 
-#: src/lib/ui/searchEntry.ts:158
+#: src/lib/ui/searchEntry.ts:69
 msgid "__File"
 msgstr "__Dosya"
 
-#: src/lib/ui/searchEntry.ts:159
+#: src/lib/ui/searchEntry.ts:70
 msgid "File__s"
 msgstr "Dosy__alar"
 
-#: src/lib/ui/searchEntry.ts:160
+#: src/lib/ui/searchEntry.ts:71
 msgid "__Link"
 msgstr "__Bağlantı"
 
-#: src/lib/ui/searchEntry.ts:161
+#: src/lib/ui/searchEntry.ts:72
 msgid "C__haracter"
 msgstr "K__arakter"
 
-#: src/lib/ui/searchEntry.ts:162
+#: src/lib/ui/searchEntry.ts:73
 msgid "Colo__r"
 msgstr "Re__nk"
 
-#: src/lib/ui/searchEntry.ts:274
+#: src/lib/ui/searchEntry.ts:184
 msgid "Type to search"
 msgstr "Aramak için yaz"
 

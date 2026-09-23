@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Copyous\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-09 16:27+0000\n"
+"POT-Creation-Date: 2026-09-23 20:14+0000\n"
 "PO-Revision-Date: 2025-11-30 20:29+0700\n"
 "Last-Translator: Victor <firephantom303@gmail.com>\n"
 "Language-Team: Russian\n"
@@ -158,21 +158,21 @@ msgstr "Код"
 #: src/lib/preferences/actions/actionDialog.ts:177
 #: src/lib/preferences/actions/actionDialog.ts:370
 #: src/lib/preferences/customization/items/fileItemCustomization.ts:79
-#: src/lib/ui/items/imageItem.ts:38
+#: src/lib/ui/items/imageItem.ts:37
 msgid "Image"
 msgstr "Изображение"
 
 #: src/lib/preferences/actions/actionDefaults.ts:144
 #: src/lib/preferences/actions/actionDialog.ts:178
 #: src/lib/preferences/actions/actionDialog.ts:373
-#: src/lib/ui/items/fileItem.ts:52
+#: src/lib/ui/items/fileItem.ts:51
 msgid "File"
 msgstr "Файл"
 
 #: src/lib/preferences/actions/actionDefaults.ts:148
 #: src/lib/preferences/actions/actionDialog.ts:179
 #: src/lib/preferences/actions/actionDialog.ts:376
-#: src/lib/ui/items/filesItem.ts:140
+#: src/lib/ui/items/filesItem.ts:144
 msgid "Files"
 msgstr "Файлы"
 
@@ -180,7 +180,7 @@ msgstr "Файлы"
 #: src/lib/preferences/actions/actionDialog.ts:180
 #: src/lib/preferences/actions/actionDialog.ts:379
 #: src/lib/preferences/customization/items/linkItemCustomization.ts:45
-#: src/lib/ui/items/linkItem.ts:303
+#: src/lib/ui/items/linkItem.ts:300
 msgid "Link"
 msgstr "Ссылка"
 
@@ -1483,7 +1483,7 @@ msgstr ""
 "системы или её завершении"
 
 #: src/lib/preferences/general/historySettings.ts:137
-#: src/lib/ui/clipboardDialog.ts:130 src/lib/ui/clipboardDialog.ts:235
+#: src/lib/ui/clipboardDialog.ts:126 src/lib/ui/clipboardDialog.ts:231
 #: src/lib/ui/indicator.ts:54
 msgid "Clear"
 msgstr "Очистить"
@@ -1793,7 +1793,7 @@ msgstr[2] ""
 msgid "Char"
 msgstr "Символ"
 
-#: src/lib/ui/items/filesItem.ts:120
+#: src/lib/ui/items/filesItem.ts:127
 #, javascript-format
 msgid "%d more file"
 msgid_plural "%d more files"
@@ -1801,7 +1801,7 @@ msgstr[0] "ещё %d файл"
 msgstr[1] "ещё %d файла"
 msgstr[2] "ещё %d файлов"
 
-#: src/lib/ui/items/filesItem.ts:121
+#: src/lib/ui/items/filesItem.ts:128
 #, javascript-format
 msgid "%d file"
 msgid_plural "%d files"
@@ -1809,11 +1809,11 @@ msgstr[0] "%d файл"
 msgstr[1] "%d файла"
 msgstr[2] "%d файлов"
 
-#: src/lib/ui/items/linkItem.ts:95
+#: src/lib/ui/items/linkItem.ts:97
 msgid "No Title"
 msgstr "Без заголовка"
 
-#: src/lib/ui/items/linkItem.ts:97
+#: src/lib/ui/items/linkItem.ts:99
 msgid "No Description"
 msgstr "Без описания"
 
@@ -1825,43 +1825,43 @@ msgstr "Буфер обмена пуст"
 msgid "No Items Found"
 msgstr "Элементы не найдены"
 
-#: src/lib/ui/searchEntry.ts:151
+#: src/lib/ui/searchEntry.ts:62
 msgid "__All"
 msgstr "__Все"
 
-#: src/lib/ui/searchEntry.ts:155
+#: src/lib/ui/searchEntry.ts:66
 msgid "__Text"
 msgstr "__Текст"
 
-#: src/lib/ui/searchEntry.ts:156
+#: src/lib/ui/searchEntry.ts:67
 msgid "__Code"
 msgstr "__Код"
 
-#: src/lib/ui/searchEntry.ts:157
+#: src/lib/ui/searchEntry.ts:68
 msgid "__Image"
 msgstr "__Изобр"
 
-#: src/lib/ui/searchEntry.ts:158
+#: src/lib/ui/searchEntry.ts:69
 msgid "__File"
 msgstr "__Файл"
 
-#: src/lib/ui/searchEntry.ts:159
+#: src/lib/ui/searchEntry.ts:70
 msgid "File__s"
 msgstr "Фай__лы"
 
-#: src/lib/ui/searchEntry.ts:160
+#: src/lib/ui/searchEntry.ts:71
 msgid "__Link"
 msgstr "__Ссылка"
 
-#: src/lib/ui/searchEntry.ts:161
+#: src/lib/ui/searchEntry.ts:72
 msgid "C__haracter"
 msgstr "С__имвол"
 
-#: src/lib/ui/searchEntry.ts:162
+#: src/lib/ui/searchEntry.ts:73
 msgid "Colo__r"
 msgstr "Цв__ет"
 
-#: src/lib/ui/searchEntry.ts:274
+#: src/lib/ui/searchEntry.ts:184
 msgid "Type to search"
 msgstr "Введите текст для поиска"
 

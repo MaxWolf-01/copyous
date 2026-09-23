@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Copyous\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-09 16:27+0000\n"
+"POT-Creation-Date: 2026-09-23 20:14+0000\n"
 "PO-Revision-Date: 2026-04-30 18:05+0200\n"
 "Last-Translator: Adam Lewicki <a.lewicki95@gmail.com>\n"
 "Language-Team: \n"
@@ -158,21 +158,21 @@ msgstr "Kod"
 #: src/lib/preferences/actions/actionDialog.ts:177
 #: src/lib/preferences/actions/actionDialog.ts:370
 #: src/lib/preferences/customization/items/fileItemCustomization.ts:79
-#: src/lib/ui/items/imageItem.ts:38
+#: src/lib/ui/items/imageItem.ts:37
 msgid "Image"
 msgstr "Obraz"
 
 #: src/lib/preferences/actions/actionDefaults.ts:144
 #: src/lib/preferences/actions/actionDialog.ts:178
 #: src/lib/preferences/actions/actionDialog.ts:373
-#: src/lib/ui/items/fileItem.ts:52
+#: src/lib/ui/items/fileItem.ts:51
 msgid "File"
 msgstr "Plik"
 
 #: src/lib/preferences/actions/actionDefaults.ts:148
 #: src/lib/preferences/actions/actionDialog.ts:179
 #: src/lib/preferences/actions/actionDialog.ts:376
-#: src/lib/ui/items/filesItem.ts:140
+#: src/lib/ui/items/filesItem.ts:144
 msgid "Files"
 msgstr "Pliki"
 
@@ -180,7 +180,7 @@ msgstr "Pliki"
 #: src/lib/preferences/actions/actionDialog.ts:180
 #: src/lib/preferences/actions/actionDialog.ts:379
 #: src/lib/preferences/customization/items/linkItemCustomization.ts:45
-#: src/lib/ui/items/linkItem.ts:303
+#: src/lib/ui/items/linkItem.ts:300
 msgid "Link"
 msgstr "Odnośnik"
 
@@ -1498,7 +1498,7 @@ msgstr ""
 "wylogowywania lub zamykania systemu"
 
 #: src/lib/preferences/general/historySettings.ts:137
-#: src/lib/ui/clipboardDialog.ts:130 src/lib/ui/clipboardDialog.ts:235
+#: src/lib/ui/clipboardDialog.ts:126 src/lib/ui/clipboardDialog.ts:231
 #: src/lib/ui/indicator.ts:54
 msgid "Clear"
 msgstr "Wyczyść"
@@ -1809,7 +1809,7 @@ msgstr[2] "%d plików"
 msgid "Char"
 msgstr "Znak"
 
-#: src/lib/ui/items/filesItem.ts:120
+#: src/lib/ui/items/filesItem.ts:127
 #, javascript-format
 msgid "%d more file"
 msgid_plural "%d more files"
@@ -1817,7 +1817,7 @@ msgstr[0] "%d plik więcej"
 msgstr[1] "%d pliki więcej"
 msgstr[2] "%d plików więcej"
 
-#: src/lib/ui/items/filesItem.ts:121
+#: src/lib/ui/items/filesItem.ts:128
 #, javascript-format
 msgid "%d file"
 msgid_plural "%d files"
@@ -1825,11 +1825,11 @@ msgstr[0] "%d plik"
 msgstr[1] "%d pliki"
 msgstr[2] "%d plików"
 
-#: src/lib/ui/items/linkItem.ts:95
+#: src/lib/ui/items/linkItem.ts:97
 msgid "No Title"
 msgstr "Brak tytułu"
 
-#: src/lib/ui/items/linkItem.ts:97
+#: src/lib/ui/items/linkItem.ts:99
 msgid "No Description"
 msgstr "Brak opisu"
 
@@ -1841,43 +1841,43 @@ msgstr "Schowek jest pusty"
 msgid "No Items Found"
 msgstr "Nie znaleziono elementów"
 
-#: src/lib/ui/searchEntry.ts:151
+#: src/lib/ui/searchEntry.ts:62
 msgid "__All"
 msgstr "__Wszystko"
 
-#: src/lib/ui/searchEntry.ts:155
+#: src/lib/ui/searchEntry.ts:66
 msgid "__Text"
 msgstr "__Tekst"
 
-#: src/lib/ui/searchEntry.ts:156
+#: src/lib/ui/searchEntry.ts:67
 msgid "__Code"
 msgstr "__Kod"
 
-#: src/lib/ui/searchEntry.ts:157
+#: src/lib/ui/searchEntry.ts:68
 msgid "__Image"
 msgstr "__Obraz"
 
-#: src/lib/ui/searchEntry.ts:158
+#: src/lib/ui/searchEntry.ts:69
 msgid "__File"
 msgstr "__Plik"
 
-#: src/lib/ui/searchEntry.ts:159
+#: src/lib/ui/searchEntry.ts:70
 msgid "File__s"
 msgstr "Plik_i"
 
-#: src/lib/ui/searchEntry.ts:160
+#: src/lib/ui/searchEntry.ts:71
 msgid "__Link"
 msgstr "__Odnośnik"
 
-#: src/lib/ui/searchEntry.ts:161
+#: src/lib/ui/searchEntry.ts:72
 msgid "C__haracter"
 msgstr "Z_nak"
 
-#: src/lib/ui/searchEntry.ts:162
+#: src/lib/ui/searchEntry.ts:73
 msgid "Colo__r"
 msgstr "Kolo_r"
 
-#: src/lib/ui/searchEntry.ts:274
+#: src/lib/ui/searchEntry.ts:184
 msgid "Type to search"
 msgstr "Wpisz, aby wyszukać"
 
