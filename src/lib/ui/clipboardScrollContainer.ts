@@ -245,13 +245,17 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 	/**
 	 * The window holds as many matches as fill the dialog, one more for the part of an item at its edge. Only the
 	 * window's entries have their items shown, and every item shown for the first time costs a few ms of style and
-	 * layout, so the window is no larger. Items smaller than their largest are revealed until the view is full.
+	 * layout, so the window is no larger than that. Items smaller than their largest are revealed until the view is
+	 * full. A dialog laid out top to bottom counts its header and footer as list, one item too many at most.
 	 */
 	private updateWindowSize(): void {
 		const settings = this.ext.settings;
 		const horizontal = settings.get_enum('clipboard-orientation') === Clutter.Orientation.HORIZONTAL;
 		const item = settings.get_int(horizontal ? 'item-width' : 'item-height');
-		this._history.windowSize = Math.ceil(settings.get_int('clipboard-size') / Math.max(item, 1)) + 1;
+		this._history.windowSize = Math.ceil(settings.get_int('clipboard-size') / item) + 1;
+
+		// Changed in the preferences, which the dialog closes to open: the next open shows the new window
+		if (!this.mapped) this.reset();
 	}
 
 	private get horizontal(): boolean {

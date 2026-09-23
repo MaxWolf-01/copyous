@@ -26,12 +26,13 @@ _In code_: `SearchQuery`
 An entry the search query selects. With an empty search query, every entry matches.
 _Avoid_: Result, hit
 
-**Window**:
-The run of matches the dialog shows. Only entries in the window have their items shown, so the length of the history costs nothing on screen.
-_Avoid_: Page, viewport, visible range
+**List window**:
+The run of matches the dialog shows. Only entries in the list window have their items shown, so the length of the history costs nothing on screen.
+_Avoid_: Window (alone: the preferences have one), page, viewport, visible range
+_In code_: `windowSize`
 
 **Reveal**:
-Moving an end of the window to take in more matches, as scrolling or the keyboard nears it.
+Moving an end of the list window to take in more matches, as scrolling or the keyboard nears it.
 _Avoid_: Load more, expand
 
 **Prewarm**:
